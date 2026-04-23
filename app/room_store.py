@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 import string
 import time
@@ -18,6 +19,7 @@ ROOM_CODE_LEN = 8
 ROOM_CODE_ALPHABET = string.ascii_uppercase + string.digits
 ROOM_NAME_CITIES = ["london", "athens", "berlin", "madrid", "dublin", "lisbon", "oslo", "rome"]
 ROOM_NAME_ANIMALS = ["elephant", "fox", "otter", "panda", "koala", "falcon", "tiger", "whale"]
+ROOM_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -86,10 +88,17 @@ class RoomManager:
         quiz_title: str,
         questions: list[dict[str, Any]],
         host_name: str,
+        room_name: str = "",
     ) -> dict[str, Any]:
         async with self.global_lock:
             room_code = self._new_room_code()
-            room_name = self._new_room_name()
+            normalized_room_name = self._normalize_room_name(room_name)
+            if normalized_room_name:
+                if normalized_room_name in self.room_names:
+                    raise HTTPException(status_code=409, detail="Room name already exists")
+                final_room_name = normalized_room_name
+            else:
+                final_room_name = self._new_room_name()
             room_token = self._new_token()
             host_player_id = self._new_id("p")
             host_token = self._new_token()
@@ -105,7 +114,7 @@ class RoomManager:
 
             room = RoomStateData(
                 room_code=room_code,
-                room_name=room_name,
+                room_name=final_room_name,
                 room_token=room_token,
                 mode=mode,
                 quiz_title=quiz_title,
@@ -114,12 +123,12 @@ class RoomManager:
                 players={host_player_id: host_player},
             )
             self.rooms[room_code] = room
-            self.room_names[room_name] = room_code
+            self.room_names[final_room_name] = room_code
             self.connections[room_code] = {}
 
         return {
             "room_code": room_code,
-            "room_name": room_name,
+            "room_name": final_room_name,
             "mode": mode,
             "room_token": room_token,
             "host_player_id": host_player_id,
@@ -268,6 +277,10 @@ class RoomManager:
             await self._handle_start_game(room, player_id)
             return
 
+        if event_type == "chat_message":
+            await self._handle_chat_message(room, player_id, payload)
+            return
+
         if event_type == "submit_answer":
             await self._handle_submit_answer(room, player_id, payload)
             return
@@ -312,6 +325,25 @@ class RoomManager:
 
         await self.broadcast(room.room_code, "game_started", self._snapshot_payload(room))
         await self._open_question(room, room.current_question)
+
+    async def _handle_chat_message(self, room: RoomStateData, player_id: str, payload: dict[str, Any]) -> None:
+        text = str(payload.get("text", "")).strip()
+        if not text:
+            return
+        if len(text) > 500:
+            text = text[:500]
+        player = room.players.get(player_id)
+        if player is None:
+            return
+        await self.broadcast(
+            room.room_code,
+            "chat_message",
+            {
+                "from": player.name,
+                "text": text,
+                "ts": time.time(),
+            },
+        )
 
     async def _handle_submit_answer(self, room: RoomStateData, player_id: str, payload: dict[str, Any]) -> None:
         answers = payload.get("answers", [])
@@ -685,6 +717,18 @@ class RoomManager:
             candidate = f"{city}-{animal}"
             if candidate not in existing:
                 return candidate
+
+    def _normalize_room_name(self, value: str) -> str:
+        candidate = (value or "").strip().lower()
+        if not candidate:
+            return ""
+        candidate = candidate.replace("_", "-").replace(" ", "-")
+        candidate = re.sub(r"-{2,}", "-", candidate).strip("-")
+        if len(candidate) < 3 or len(candidate) > 40:
+            raise HTTPException(status_code=422, detail="room_name must be 3-40 chars")
+        if not ROOM_NAME_RE.fullmatch(candidate):
+            raise HTTPException(status_code=422, detail="room_name must be lowercase letters, numbers, and hyphens")
+        return candidate
         suffix = 2
         while True:
             city = secrets.choice(ROOM_NAME_CITIES)

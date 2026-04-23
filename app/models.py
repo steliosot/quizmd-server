@@ -50,6 +50,7 @@ class CreateRoomRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Mode
+    room_name: str = ""
     quiz_title: str = Field(min_length=1)
     questions: list[QuizQuestionPayload] = Field(min_length=1)
     host_name: str = ""

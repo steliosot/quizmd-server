@@ -11,6 +11,7 @@ from app.main import app, manager
 def sample_quiz_payload(mode: str = "compete"):
     return {
         "mode": mode,
+        "room_name": "",
         "quiz_title": "Sample Quiz",
         "host_name": "Hosty",
         "questions": [
@@ -35,12 +36,15 @@ class ServerTests(unittest.TestCase):
         self.client = TestClient(app)
 
     def test_create_and_join_room(self):
-        create = self.client.post("/rooms", json=sample_quiz_payload())
+        payload = sample_quiz_payload()
+        payload["room_name"] = "berlin-elephant"
+        create = self.client.post("/rooms", json=payload)
         self.assertEqual(create.status_code, 200)
         data = create.json()
         self.assertIn("room_code", data)
         self.assertIn("room_name", data)
         self.assertIn("room_token", data)
+        self.assertEqual(data["room_name"], "berlin-elephant")
 
         join = self.client.post(
             f"/rooms/{data['room_code']}/join",
@@ -59,6 +63,9 @@ class ServerTests(unittest.TestCase):
         joined2 = join_by_name.json()
         self.assertEqual(joined2["display_name"], "Tom")
         self.assertEqual(joined2["room_name"], data["room_name"])
+
+        create_conflict = self.client.post("/rooms", json=payload)
+        self.assertEqual(create_conflict.status_code, 409)
 
     def test_compete_round_scoring_function(self):
         question = {"correct": [2]}

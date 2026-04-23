@@ -67,6 +67,7 @@ def _ws_base_url(public_base: str) -> str:
 async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoomResponse:
     created = await manager.create_room(
         mode=payload.mode,
+        room_name=payload.room_name,
         quiz_title=payload.quiz_title,
         questions=[q.model_dump() for q in payload.questions],
         host_name=payload.host_name,
