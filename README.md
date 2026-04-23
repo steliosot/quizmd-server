@@ -127,6 +127,27 @@ gcloud run services update quizmd-server \
   --set-env-vars QUIZMD_PUBLIC_BASE_URL=https://<your-service-url>
 ```
 
+## Cloud Build Continuous Deploy
+
+This repo includes `cloudbuild.yaml`, so you can connect GitHub -> Cloud Build -> Cloud Run.
+
+In Cloud Run UI ("Set up with Cloud Build"):
+
+1. Source repository: `steliosot/quizmd-server`
+2. Branch: `main`
+3. Build type: Dockerfile (repo root)
+4. Build config file: `cloudbuild.yaml`
+5. Service name: `quizmd-server`
+6. Region: `us-central1`
+
+After first deploy, set:
+
+```bash
+gcloud run services update quizmd-server \
+  --region us-central1 \
+  --set-env-vars QUIZMD_PUBLIC_BASE_URL=https://<cloud-run-service-url>
+```
+
 ## Notes
 
 - v1 uses in-memory room state. If container restarts, active rooms are lost.
