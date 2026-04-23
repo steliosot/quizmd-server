@@ -16,6 +16,8 @@ from .namegen import ensure_unique_name, generate_funny_name
 
 ROOM_CODE_LEN = 8
 ROOM_CODE_ALPHABET = string.ascii_uppercase + string.digits
+ROOM_NAME_CITIES = ["london", "athens", "berlin", "madrid", "dublin", "lisbon", "oslo", "rome"]
+ROOM_NAME_ANIMALS = ["elephant", "fox", "otter", "panda", "koala", "falcon", "tiger", "whale"]
 
 
 def _env_int(name: str, default: int) -> int:
@@ -50,6 +52,7 @@ class PlayerState:
 @dataclass(slots=True)
 class RoomStateData:
     room_code: str
+    room_name: str
     room_token: str
     mode: Mode
     quiz_title: str
@@ -72,6 +75,7 @@ class RoomStateData:
 class RoomManager:
     def __init__(self) -> None:
         self.rooms: dict[str, RoomStateData] = {}
+        self.room_names: dict[str, str] = {}
         self.connections: dict[str, dict[str, WebSocket]] = {}
         self.global_lock = asyncio.Lock()
 
@@ -85,6 +89,7 @@ class RoomManager:
     ) -> dict[str, Any]:
         async with self.global_lock:
             room_code = self._new_room_code()
+            room_name = self._new_room_name()
             room_token = self._new_token()
             host_player_id = self._new_id("p")
             host_token = self._new_token()
@@ -100,6 +105,7 @@ class RoomManager:
 
             room = RoomStateData(
                 room_code=room_code,
+                room_name=room_name,
                 room_token=room_token,
                 mode=mode,
                 quiz_title=quiz_title,
@@ -108,10 +114,12 @@ class RoomManager:
                 players={host_player_id: host_player},
             )
             self.rooms[room_code] = room
+            self.room_names[room_name] = room_code
             self.connections[room_code] = {}
 
         return {
             "room_code": room_code,
+            "room_name": room_name,
             "mode": mode,
             "room_token": room_token,
             "host_player_id": host_player_id,
@@ -125,7 +133,18 @@ class RoomManager:
             raise HTTPException(status_code=404, detail="Room not found")
         if room.room_token != room_token:
             raise HTTPException(status_code=403, detail="Invalid room token")
+        return await self._join_room_internal(room=room, player_name=player_name)
 
+    async def join_room_by_name(self, *, room_name: str, player_name: str) -> dict[str, Any]:
+        room_code = self.room_names.get(room_name.lower())
+        if room_code is None:
+            raise HTTPException(status_code=404, detail="Room not found")
+        room = self.rooms.get(room_code)
+        if room is None:
+            raise HTTPException(status_code=404, detail="Room not found")
+        return await self._join_room_internal(room=room, player_name=player_name)
+
+    async def _join_room_internal(self, *, room: RoomStateData, player_name: str) -> dict[str, Any]:
         async with room.lock:
             if room.state == RoomState.finished:
                 raise HTTPException(status_code=410, detail="Room already finished")
@@ -146,15 +165,28 @@ class RoomManager:
             )
             room.updated_at = time.time()
 
-        await self.broadcast(room_code, "player_joined", {"name": display_name})
-        await self.broadcast(room_code, "lobby_update", self._snapshot_payload(room))
+        await self.broadcast(room.room_code, "player_joined", {"name": display_name})
+        await self.broadcast(room.room_code, "lobby_update", self._snapshot_payload(room))
 
         return {
-            "room_code": room_code,
+            "room_code": room.room_code,
+            "room_name": room.room_name,
             "player_id": player_id,
             "player_token": token,
             "display_name": display_name,
         }
+
+    def resolve_room(self, room_ref: str) -> RoomStateData:
+        room = self.rooms.get(room_ref)
+        if room is not None:
+            return room
+        room_code = self.room_names.get(room_ref.lower())
+        if room_code is None:
+            raise HTTPException(status_code=404, detail="Room not found")
+        room = self.rooms.get(room_code)
+        if room is None:
+            raise HTTPException(status_code=404, detail="Room not found")
+        return room
 
     def get_snapshot(self, room_code: str) -> RoomSnapshot:
         room = self.rooms.get(room_code)
@@ -578,6 +610,7 @@ class RoomManager:
                     room = self.rooms.pop(code, None)
                     self.connections.pop(code, None)
                     if room:
+                        self.room_names.pop(room.room_name.lower(), None)
                         await self._cancel_round_timer(room)
                         if room.host_grace_task and not room.host_grace_task.done():
                             room.host_grace_task.cancel()
@@ -643,6 +676,23 @@ class RoomManager:
             code = "".join(secrets.choice(ROOM_CODE_ALPHABET) for _ in range(ROOM_CODE_LEN))
             if code not in self.rooms:
                 return code
+
+    def _new_room_name(self) -> str:
+        existing = set(self.room_names.keys())
+        for _ in range(300):
+            city = secrets.choice(ROOM_NAME_CITIES)
+            animal = secrets.choice(ROOM_NAME_ANIMALS)
+            candidate = f"{city}-{animal}"
+            if candidate not in existing:
+                return candidate
+        suffix = 2
+        while True:
+            city = secrets.choice(ROOM_NAME_CITIES)
+            animal = secrets.choice(ROOM_NAME_ANIMALS)
+            candidate = f"{city}-{animal}-{suffix}"
+            if candidate not in existing:
+                return candidate
+            suffix += 1
 
     @staticmethod
     def _new_token() -> str:

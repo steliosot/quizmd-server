@@ -57,6 +57,7 @@ class CreateRoomRequest(BaseModel):
 
 class CreateRoomResponse(BaseModel):
     room_code: str
+    room_name: str
     mode: Mode
     join_url: str
     ws_url: str
@@ -73,8 +74,15 @@ class JoinRoomRequest(BaseModel):
     player_name: str = ""
 
 
+class JoinByNameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    player_name: str = ""
+
+
 class JoinRoomResponse(BaseModel):
     room_code: str
+    room_name: str
     player_id: str
     player_token: str
     display_name: str
