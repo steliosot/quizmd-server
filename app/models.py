@@ -9,6 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class Mode(str, Enum):
     compete = "compete"
     collaborate = "collaborate"
+    boxing = "boxing"
+
+
+class RoomRole(str, Enum):
+    participant = "participant"
+    teacher = "teacher"
+    student = "student"
 
 
 class RoomState(str, Enum):
@@ -54,6 +61,7 @@ class CreateRoomRequest(BaseModel):
     quiz_title: str = Field(min_length=1)
     questions: list[QuizQuestionPayload] = Field(min_length=1)
     host_name: str = ""
+    host_role: RoomRole | None = None
 
 
 class CreateRoomResponse(BaseModel):
@@ -66,6 +74,7 @@ class CreateRoomResponse(BaseModel):
     host_player_id: str
     host_player_token: str
     host_display_name: str
+    host_role: RoomRole
 
 
 class JoinRoomRequest(BaseModel):
@@ -73,21 +82,25 @@ class JoinRoomRequest(BaseModel):
 
     room_token: str = Field(min_length=8)
     player_name: str = ""
+    role: RoomRole | None = None
 
 
 class JoinByNameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     player_name: str = ""
+    role: RoomRole | None = None
 
 
 class JoinRoomResponse(BaseModel):
     room_code: str
     room_name: str
+    mode: Mode
     player_id: str
     player_token: str
     display_name: str
     ws_url: str
+    player_role: RoomRole
 
 
 class PlayerSnapshot(BaseModel):
@@ -97,6 +110,7 @@ class PlayerSnapshot(BaseModel):
     ready: bool
     connected: bool
     is_host: bool
+    role: RoomRole
 
 
 class RoomSnapshot(BaseModel):

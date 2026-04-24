@@ -71,6 +71,7 @@ async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoo
         quiz_title=payload.quiz_title,
         questions=[q.model_dump() for q in payload.questions],
         host_name=payload.host_name,
+        host_role=payload.host_role,
     )
 
     base = _public_base_url(request)
@@ -89,6 +90,7 @@ async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoo
         host_player_id=created["host_player_id"],
         host_player_token=created["host_player_token"],
         host_display_name=created["host_display_name"],
+        host_role=created["host_role"],
     )
 
 
@@ -98,16 +100,19 @@ async def join_room(room_code: str, request: Request, payload: JoinRoomRequest) 
         room_code=room_code,
         room_token=payload.room_token,
         player_name=payload.player_name,
+        role=payload.role,
     )
 
     ws_base = _ws_base_url(_public_base_url(request))
     return JoinRoomResponse(
         room_code=joined["room_code"],
         room_name=joined["room_name"],
+        mode=joined["mode"],
         player_id=joined["player_id"],
         player_token=joined["player_token"],
         display_name=joined["display_name"],
         ws_url=f"{ws_base}/rooms/{room_code}/ws",
+        player_role=joined["player_role"],
     )
 
 
@@ -116,16 +121,19 @@ async def join_room_by_name(room_name: str, request: Request, payload: JoinByNam
     joined = await manager.join_room_by_name(
         room_name=room_name,
         player_name=payload.player_name,
+        role=payload.role,
     )
 
     ws_base = _ws_base_url(_public_base_url(request))
     return JoinRoomResponse(
         room_code=joined["room_code"],
         room_name=joined["room_name"],
+        mode=joined["mode"],
         player_id=joined["player_id"],
         player_token=joined["player_token"],
         display_name=joined["display_name"],
         ws_url=f"{ws_base}/rooms/{joined['room_code']}/ws",
+        player_role=joined["player_role"],
     )
 
 
@@ -151,7 +159,7 @@ async def join_link_info(room_ref: str) -> JSONResponse:
             "mode": snapshot.mode.value,
             "message": (
                 "Use quizmd-client to join: "
-                f'python quizmd_client.py room --create "{room.room_name}" --name "YourName"'
+                f'python quizmd_client.py room --join "{room.room_name}" --name "YourName"'
             ),
         }
     )
