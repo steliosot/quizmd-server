@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -31,6 +32,11 @@ manager = RoomManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if sys.version_info >= (3, 14):
+        logger.warning(
+            "Local server development is recommended on Python 3.13. "
+            "Python 3.14 may fail installing dependencies (pydantic-core build issue)."
+        )
     cleanup_task = asyncio.create_task(manager.cleanup_stale_rooms())
     try:
         yield
@@ -120,6 +126,7 @@ async def join_room(room_code: str, request: Request, payload: JoinRoomRequest) 
 async def join_room_by_name(room_name: str, request: Request, payload: JoinByNameRequest) -> JoinRoomResponse:
     joined = await manager.join_room_by_name(
         room_name=room_name,
+        room_token=payload.room_token,
         player_name=payload.player_name,
         role=payload.role,
     )
@@ -157,9 +164,10 @@ async def join_link_info(room_ref: str) -> JSONResponse:
             "room_name": room.room_name,
             "quiz_title": snapshot.quiz_title,
             "mode": snapshot.mode.value,
+            "token_required": True,
             "message": (
-                "Use quizmd-client to join: "
-                f'python quizmd_client.py room --join "{room.room_name}" --name "YourName"'
+                "Use quizmd to join (room token required): "
+                f'quizmd room --join "{room.room_name}" --token "<ROOM_TOKEN>" --name "YourName"'
             ),
         }
     )

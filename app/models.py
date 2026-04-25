@@ -88,6 +88,7 @@ class JoinRoomRequest(BaseModel):
 class JoinByNameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    room_token: str = Field(min_length=8)
     player_name: str = ""
     role: RoomRole | None = None
 
