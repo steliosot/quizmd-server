@@ -79,6 +79,7 @@ class ServerTests(unittest.TestCase):
         manager.rooms.clear()
         manager.room_names.clear()
         manager.connections.clear()
+        manager.start_countdown_seconds = 0
         self.client = TestClient(app)
 
     def test_create_and_join_room(self):
@@ -261,6 +262,33 @@ class ServerTests(unittest.TestCase):
             players = {row["name"]: row["score"] for row in sb["payload"]["players"]}
             self.assertEqual(players["Hosty"], 3)
             self.assertEqual(players["Tom"], -3)
+
+    def test_start_game_broadcasts_countdown_before_question(self):
+        manager.start_countdown_seconds = 5
+        create = self.client.post("/rooms", json=sample_quiz_payload(mode="compete"))
+        self.assertEqual(create.status_code, 200)
+        c = create.json()
+
+        def consume_until(ws, wanted_type: str, max_events: int = 20):
+            for _ in range(max_events):
+                msg = ws.receive_json()
+                if msg.get("type") == wanted_type:
+                    return msg
+            raise AssertionError(f"Did not receive {wanted_type}")
+
+        with self.client.websocket_connect(
+            f"/rooms/{c['room_code']}/ws?player_id={c['host_player_id']}&token={c['host_player_token']}"
+        ) as ws_host:
+            consume_until(ws_host, "connected")
+            ws_host.send_json({"type": "start_game", "payload": {}})
+            starting = consume_until(ws_host, "game_starting")
+            self.assertEqual(starting["payload"]["countdown_seconds"], 5)
+            self.assertIn("start_epoch", starting["payload"])
+
+        room = manager.rooms.get(c["room_code"])
+        if room and room.start_countdown_task:
+            room.start_countdown_task.cancel()
+        manager.start_countdown_seconds = 0
 
     def test_reconnected_non_host_gets_current_question(self):
         create = self.client.post("/rooms", json=sample_quiz_payload())

@@ -39,6 +39,7 @@ ROOM_TTL_MINUTES = _env_int("ROOM_TTL_MINUTES", 30)
 HOST_REJOIN_SECONDS = _env_int("HOST_REJOIN_SECONDS", 60)
 COLLABORATE_MAX_RETRIES = max(1, _env_int("COLLABORATE_MAX_RETRIES", 3))
 COLLABORATE_DISCUSSION_SECONDS = max(0, _env_int("COLLABORATE_DISCUSSION_SECONDS", 40))
+DEFAULT_START_COUNTDOWN_SECONDS = max(0, _env_int("START_COUNTDOWN_SECONDS", 5))
 
 
 @dataclass(slots=True)
@@ -73,6 +74,8 @@ class RoomStateData:
     submissions: dict[str, Submission] = field(default_factory=dict)
     round_deadline: float | None = None
     round_timeout_task: asyncio.Task | None = None
+    start_countdown_task: asyncio.Task | None = None
+    start_deadline: float | None = None
     host_grace_task: asyncio.Task | None = None
     paused_remaining_seconds: int | None = None
     collaborate_phase: str = "discussion"
@@ -87,6 +90,7 @@ class RoomManager:
         self.room_names: dict[str, str] = {}
         self.connections: dict[str, dict[str, WebSocket]] = {}
         self.global_lock = asyncio.Lock()
+        self.start_countdown_seconds = DEFAULT_START_COUNTDOWN_SECONDS
 
     async def create_room(
         self,
@@ -373,10 +377,13 @@ class RoomManager:
 
     async def _handle_start_game(self, room: RoomStateData, player_id: str) -> None:
         error_message = ""
+        start_payload: dict[str, Any] | None = None
         async with room.lock:
             if room.players[player_id].is_host is False:
                 raise HTTPException(status_code=403, detail="Only host can start game")
             if room.state not in {RoomState.waiting, RoomState.paused}:
+                return
+            if room.start_countdown_task and not room.start_countdown_task.done():
                 return
 
             connected_players = [p for p in room.players.values() if p.connected]
@@ -388,22 +395,51 @@ class RoomManager:
                 room_code = room.room_code
             else:
                 room_code = room.room_code
-                room.state = RoomState.playing
-                room.current_question = 0
-                room.team_score = 0
-                room.submissions = {}
-                room.collaborate_retry_count = 0
-                for p in room.players.values():
-                    p.score = 0
-                    p.ready = False
+                countdown = int(self.start_countdown_seconds)
+                room.start_deadline = time.time() + countdown
+                room.start_countdown_task = asyncio.create_task(self._start_game_after_countdown(room.room_code))
                 room.updated_at = time.time()
+                start_payload = {
+                    **self._snapshot_payload(room),
+                    "countdown_seconds": countdown,
+                    "start_epoch": room.start_deadline,
+                }
 
         if error_message:
             await self.send_to_player(room_code, player_id, "error", {"message": error_message})
             return
 
-        await self.broadcast(room.room_code, "game_started", self._snapshot_payload(room))
-        await self._open_question(room, room.current_question)
+        if start_payload is not None:
+            await self.broadcast(room.room_code, "game_starting", start_payload)
+
+    async def _start_game_after_countdown(self, room_code: str) -> None:
+        try:
+            room = self.rooms.get(room_code)
+            if room is None:
+                return
+            delay = max(0, int(self.start_countdown_seconds))
+            if delay:
+                await asyncio.sleep(delay)
+
+            async with room.lock:
+                if room.state not in {RoomState.waiting, RoomState.paused}:
+                    return
+                room.state = RoomState.playing
+                room.current_question = 0
+                room.team_score = 0
+                room.submissions = {}
+                room.collaborate_retry_count = 0
+                room.start_countdown_task = None
+                room.start_deadline = None
+                for p in room.players.values():
+                    p.score = 0
+                    p.ready = False
+                room.updated_at = time.time()
+
+            await self.broadcast(room.room_code, "game_started", self._snapshot_payload(room))
+            await self._open_question(room, room.current_question)
+        except asyncio.CancelledError:
+            return
 
     async def _handle_chat_message(self, room: RoomStateData, player_id: str, payload: dict[str, Any]) -> None:
         text = str(payload.get("text", "")).strip()
@@ -771,6 +807,13 @@ class RoomManager:
         if task and not task.done():
             task.cancel()
 
+    async def _cancel_start_countdown(self, room: RoomStateData) -> None:
+        task = room.start_countdown_task
+        room.start_countdown_task = None
+        room.start_deadline = None
+        if task and not task.done():
+            task.cancel()
+
     async def send_current_question(self, room_code: str, player_id: str) -> None:
         room = self.rooms.get(room_code)
         if room is None or room.state != RoomState.playing:
@@ -843,6 +886,7 @@ class RoomManager:
                     if room:
                         self.room_names.pop(room.room_name.lower(), None)
                         await self._cancel_round_timer(room)
+                        await self._cancel_start_countdown(room)
                         if room.host_grace_task and not room.host_grace_task.done():
                             room.host_grace_task.cancel()
 
@@ -859,6 +903,7 @@ class RoomManager:
             self.connections.pop(room_code, None)
             self.room_names.pop(room.room_name.lower(), None)
             await self._cancel_round_timer(room)
+            await self._cancel_start_countdown(room)
             if room.host_grace_task and not room.host_grace_task.done():
                 room.host_grace_task.cancel()
 
