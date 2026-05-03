@@ -171,10 +171,10 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(open_info.json()["token_required"])
 
     def test_compete_round_scoring_function(self):
-        question = {"correct": [2]}
+        question = {"correct": [2], "points": 5, "time_limit": 20, "deadline_epoch": 21.0}
         submissions = {
             "a": Submission(player_id="a", answers=[2], ts=1.0),
-            "b": Submission(player_id="b", answers=[2], ts=2.0),
+            "b": Submission(player_id="b", answers=[2], ts=11.0),
             "c": Submission(player_id="c", answers=[1], ts=3.0),
         }
         deltas, correctness = compete_round_scores(
@@ -182,12 +182,61 @@ class ServerTests(unittest.TestCase):
             submissions=submissions,
             active_player_ids=["a", "b", "c", "d"],
         )
-        self.assertEqual(deltas["a"], 3)
-        self.assertEqual(deltas["b"], 2)
-        self.assertEqual(deltas["c"], -3)
-        self.assertEqual(deltas["d"], -3)
+        self.assertEqual(deltas["a"], 6.25)
+        self.assertEqual(deltas["b"], 5.62)
+        self.assertEqual(deltas["c"], 0)
+        self.assertEqual(deltas["d"], 0)
         self.assertTrue(correctness["a"])
         self.assertFalse(correctness["c"])
+
+    def test_compete_round_scoring_uses_large_question_value(self):
+        question = {"correct": [1], "points": 100, "time_limit": 25, "deadline_epoch": 25.0}
+        submissions = {
+            "fast": Submission(player_id="fast", answers=[1], ts=5.0),
+            "slow": Submission(player_id="slow", answers=[1], ts=22.0),
+            "wrong": Submission(player_id="wrong", answers=[2], ts=9.0),
+        }
+        deltas, correctness = compete_round_scores(
+            question=question,
+            submissions=submissions,
+            active_player_ids=["fast", "slow", "wrong"],
+        )
+        self.assertEqual(deltas["fast"], 120)
+        self.assertEqual(deltas["slow"], 103)
+        self.assertEqual(deltas["wrong"], 0)
+        self.assertTrue(correctness["fast"])
+        self.assertTrue(correctness["slow"])
+        self.assertFalse(correctness["wrong"])
+
+    def test_compete_round_scores_aggregate_different_question_values(self):
+        totals = {"tom": 0.0, "maya": 0.0}
+        q1 = {"correct": [1], "points": 5, "time_limit": 10, "deadline_epoch": 10.0}
+        q1_deltas, _ = compete_round_scores(
+            question=q1,
+            submissions={
+                "tom": Submission(player_id="tom", answers=[1], ts=2.0),
+                "maya": Submission(player_id="maya", answers=[1], ts=8.0),
+            },
+            active_player_ids=["tom", "maya"],
+        )
+        q2 = {"correct": [2], "points": 100, "time_limit": 25, "deadline_epoch": 25.0}
+        q2_deltas, _ = compete_round_scores(
+            question=q2,
+            submissions={
+                "tom": Submission(player_id="tom", answers=[2], ts=5.0),
+                "maya": Submission(player_id="maya", answers=[1], ts=5.0),
+            },
+            active_player_ids=["tom", "maya"],
+        )
+        for pid in totals:
+            totals[pid] += q1_deltas[pid] + q2_deltas[pid]
+
+        self.assertEqual(q1_deltas["tom"], 6.0)
+        self.assertEqual(q1_deltas["maya"], 5.25)
+        self.assertEqual(q2_deltas["tom"], 120.0)
+        self.assertEqual(q2_deltas["maya"], 0)
+        self.assertEqual(totals["tom"], 126.0)
+        self.assertEqual(totals["maya"], 5.25)
 
     def test_collaborate_consensus_function(self):
         question = {"correct": [1]}
@@ -260,8 +309,9 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(rr["payload"]["question_index"], 0)
             sb = consume_until(ws_host, "scoreboard")
             players = {row["name"]: row["score"] for row in sb["payload"]["players"]}
-            self.assertEqual(players["Hosty"], 3)
-            self.assertEqual(players["Tom"], -3)
+            self.assertGreaterEqual(players["Hosty"], 1)
+            self.assertLessEqual(players["Hosty"], 1.25)
+            self.assertEqual(players["Tom"], 0)
             waiting = consume_until(ws_host, "awaiting_next")
             self.assertTrue(waiting["payload"]["finished_after_continue"])
             ws_host.send_json({"type": "next_question", "payload": {}})
@@ -383,7 +433,7 @@ class ServerTests(unittest.TestCase):
                 q = consume_until(ws_tom_reconnect, "question")
                 self.assertEqual(q["payload"]["question_index"], 0)
 
-    def test_compete_disconnect_before_submit_still_gets_penalty(self):
+    def test_compete_disconnect_before_submit_scores_zero(self):
         payload = sample_quiz_payload()
         payload["questions"][0]["time_limit"] = 5
         create = self.client.post("/rooms", json=payload)
@@ -418,12 +468,12 @@ class ServerTests(unittest.TestCase):
                 consume_until(ws_host, "question")
                 consume_until(ws_tom, "question")
 
-            # Tom disconnects before submitting; host submits wrong and timeout should penalize both.
+            # Tom disconnects before submitting; wrong/missing answers receive no points.
             ws_host.send_json({"type": "submit_answer", "payload": {"question_index": 0, "answers": [1]}})
             sb = consume_until(ws_host, "scoreboard", max_events=240)
             players = {row["name"]: row["score"] for row in sb["payload"]["players"]}
-            self.assertEqual(players["Hosty"], -3)
-            self.assertEqual(players["Tom"], -3)
+            self.assertEqual(players["Hosty"], 0)
+            self.assertEqual(players["Tom"], 0)
 
     def test_create_boxing_room_is_rejected(self):
         create = self.client.post("/rooms", json=sample_quiz_payload(mode="boxing"))

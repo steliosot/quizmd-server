@@ -21,31 +21,41 @@ def compete_round_scores(
     question: dict[str, Any],
     submissions: dict[str, Submission],
     active_player_ids: list[str],
-    wrong_penalty: int = -3,
-) -> tuple[dict[str, int], dict[str, bool]]:
+    wrong_penalty: int = 0,
+) -> tuple[dict[str, float], dict[str, bool]]:
     """Return (score_delta_by_player, correctness_by_player)."""
-    score_delta = {pid: 0 for pid in active_player_ids}
+    score_delta = {pid: 0.0 for pid in active_player_ids}
     correctness = {pid: False for pid in active_player_ids}
+    try:
+        question_points = float(question.get("points", 1) or 1)
+    except (TypeError, ValueError):
+        question_points = 1.0
+    question_points = max(0.0, question_points)
+    try:
+        time_limit = float(question.get("time_limit") or 0)
+    except (TypeError, ValueError):
+        time_limit = 0.0
+    try:
+        deadline_epoch = float(question.get("deadline_epoch") or 0)
+    except (TypeError, ValueError):
+        deadline_epoch = 0.0
 
-    ranked_correct: list[Submission] = []
     for pid in active_player_ids:
         sub = submissions.get(pid)
         if sub is None:
-            # timeout/no submission is treated as wrong penalty in compete mode
-            score_delta[pid] += wrong_penalty
+            score_delta[pid] += float(wrong_penalty)
             continue
 
         is_correct = answer_is_correct(question, sub.answers)
         correctness[pid] = is_correct
         if is_correct:
-            ranked_correct.append(sub)
+            time_bonus = 0.0
+            if time_limit > 0 and deadline_epoch > 0:
+                time_left = min(time_limit, max(0.0, deadline_epoch - sub.ts))
+                time_bonus = (question_points / 4.0) * (time_left / time_limit)
+            score_delta[pid] += round(question_points + time_bonus, 2)
         else:
-            score_delta[pid] += wrong_penalty
-
-    ranked_correct.sort(key=lambda x: x.ts)
-    podium = [3, 2, 1]
-    for idx, sub in enumerate(ranked_correct[:3]):
-        score_delta[sub.player_id] += podium[idx]
+            score_delta[pid] += float(wrong_penalty)
 
     return score_delta, correctness
 

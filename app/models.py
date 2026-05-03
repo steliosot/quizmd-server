@@ -31,6 +31,7 @@ class QuizQuestionPayload(BaseModel):
     correct: list[int] = Field(min_length=1)
     type: Literal["single", "multiple"] = "single"
     time_limit: int | None = Field(default=30, ge=5, le=300)
+    points: float = Field(default=1, gt=0)
     discussion_time: int | None = Field(default=None, ge=0, le=300)
     explanation: str = ""
 

@@ -49,7 +49,7 @@ class PlayerState:
     name: str
     is_host: bool
     role: RoomRole = RoomRole.participant
-    score: int = 0
+    score: float = 0.0
     ready: bool = False
     connected: bool = False
     last_seen: float = field(default_factory=time.time)
@@ -438,7 +438,7 @@ class RoomManager:
                 room.start_deadline = None
                 room.awaiting_next = False
                 for p in room.players.values():
-                    p.score = 0
+                    p.score = 0.0
                     p.ready = False
                 room.updated_at = time.time()
 
@@ -619,8 +619,9 @@ class RoomManager:
             q = room.questions[room.current_question]
             active = sorted(room.round_participants) if room.round_participants else self._active_player_ids(room)
             await self._cancel_round_timer(room)
+            score_question = {**q, "deadline_epoch": room.round_deadline}
             deltas, correctness = compete_round_scores(
-                question=q,
+                question=score_question,
                 submissions=room.submissions,
                 active_player_ids=active,
             )
@@ -1037,6 +1038,7 @@ class RoomManager:
             "options": question.get("options", []),
             "type": question.get("type", "single"),
             "time_limit": question.get("time_limit") or DEFAULT_QUESTION_TIMEOUT,
+            "points": question.get("points", 1),
             "discussion_time": self._collaborate_discussion_seconds(question),
         }
 
