@@ -1,6 +1,6 @@
 substitutions:
   _SERVICE_NAME: quizmd-server
-  _REGION: us-central1
+  _REGION: europe-west1
   _PLATFORM: managed
 
 steps:
@@ -8,13 +8,13 @@ steps:
     args:
       - build
       - -t
-      - gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA
+      - gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$BUILD_ID
       - .
 
   - name: gcr.io/cloud-builders/docker
     args:
       - push
-      - gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA
+      - gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$BUILD_ID
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
@@ -23,7 +23,7 @@ steps:
       - deploy
       - ${_SERVICE_NAME}
       - --image
-      - gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA
+      - gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$BUILD_ID
       - --region
       - ${_REGION}
       - --platform
@@ -38,7 +38,7 @@ steps:
       - --timeout
       - '3600'
       - --set-env-vars
-      - ROOM_MAX_PLAYERS=16,QUESTION_TIMEOUT_SECONDS=30,ROOM_TTL_MINUTES=120,HOST_REJOIN_SECONDS=60
+      - ROOM_MAX_PLAYERS=16,QUESTION_TIMEOUT_SECONDS=30,ROOM_TTL_MINUTES=30,HOST_REJOIN_SECONDS=60,START_COUNTDOWN_SECONDS=5,COLLABORATE_MAX_RETRIES=3,COLLABORATE_DISCUSSION_SECONDS=40
 
 images:
-  - gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA
+  - gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$BUILD_ID
