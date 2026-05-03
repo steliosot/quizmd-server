@@ -39,7 +39,12 @@ ROOM_TTL_MINUTES = _env_int("ROOM_TTL_MINUTES", 30)
 HOST_REJOIN_SECONDS = _env_int("HOST_REJOIN_SECONDS", 60)
 COLLABORATE_MAX_RETRIES = max(1, _env_int("COLLABORATE_MAX_RETRIES", 3))
 COLLABORATE_DISCUSSION_SECONDS = max(0, _env_int("COLLABORATE_DISCUSSION_SECONDS", 40))
-DEFAULT_START_COUNTDOWN_SECONDS = max(0, _env_int("START_COUNTDOWN_SECONDS", 5))
+DEFAULT_ROOM_TRANSITION_COUNTDOWN_SECONDS = max(0, _env_int("ROOM_TRANSITION_COUNTDOWN_SECONDS", 5))
+DEFAULT_START_COUNTDOWN_SECONDS = max(0, _env_int("START_COUNTDOWN_SECONDS", DEFAULT_ROOM_TRANSITION_COUNTDOWN_SECONDS))
+DEFAULT_NEXT_QUESTION_COUNTDOWN_SECONDS = max(
+    0,
+    _env_int("NEXT_QUESTION_COUNTDOWN_SECONDS", DEFAULT_ROOM_TRANSITION_COUNTDOWN_SECONDS),
+)
 
 
 @dataclass(slots=True)
@@ -76,6 +81,8 @@ class RoomStateData:
     round_timeout_task: asyncio.Task | None = None
     start_countdown_task: asyncio.Task | None = None
     start_deadline: float | None = None
+    next_question_countdown_task: asyncio.Task | None = None
+    next_question_deadline: float | None = None
     host_grace_task: asyncio.Task | None = None
     paused_remaining_seconds: int | None = None
     collaborate_phase: str = "discussion"
@@ -92,6 +99,7 @@ class RoomManager:
         self.connections: dict[str, dict[str, WebSocket]] = {}
         self.global_lock = asyncio.Lock()
         self.start_countdown_seconds = DEFAULT_START_COUNTDOWN_SECONDS
+        self.next_question_countdown_seconds = DEFAULT_NEXT_QUESTION_COUNTDOWN_SECONDS
 
     async def create_room(
         self,
@@ -503,6 +511,14 @@ class RoomManager:
                     {"message": "This round is complete. Wait for the host to continue."},
                 )
                 return
+            if room.next_question_countdown_task and not room.next_question_countdown_task.done():
+                await self.send_to_player(
+                    room.room_code,
+                    player_id,
+                    "error",
+                    {"message": "Next question is starting. Wait for the countdown."},
+                )
+                return
             if q_idx != room.current_question:
                 await self.send_to_player(
                     room.room_code,
@@ -744,11 +760,15 @@ class RoomManager:
         await self._open_question(room, room.current_question)
 
     async def _handle_next_question(self, room: RoomStateData, player_id: str) -> None:
+        countdown_payload: dict[str, Any] | None = None
+        open_immediately = False
         async with room.lock:
             player = room.players.get(player_id)
             if player is None or not player.is_host:
                 raise HTTPException(status_code=403, detail="Only host can continue")
             if room.state != RoomState.playing:
+                return
+            if room.next_question_countdown_task and not room.next_question_countdown_task.done():
                 return
             if not room.awaiting_next:
                 await self.send_to_player(
@@ -759,8 +779,44 @@ class RoomManager:
                 )
                 return
             room.awaiting_next = False
+            if room.current_question >= len(room.questions):
+                room.updated_at = time.time()
+                open_immediately = True
+                question_index = room.current_question
+            else:
+                question_index = room.current_question
+                countdown = int(self.next_question_countdown_seconds)
+                room.next_question_deadline = time.time() + countdown
+                room.next_question_countdown_task = asyncio.create_task(
+                    self._open_question_after_countdown(room.room_code, question_index)
+                )
+                countdown_payload = self._next_question_countdown_payload(room, countdown)
             room.updated_at = time.time()
-        await self._open_question(room, room.current_question)
+
+        if open_immediately:
+            await self._open_question(room, question_index)
+            return
+        if countdown_payload is not None:
+            await self.broadcast(room.room_code, "next_question_starting", countdown_payload)
+
+    async def _open_question_after_countdown(self, room_code: str, question_index: int) -> None:
+        try:
+            delay = max(0, int(self.next_question_countdown_seconds))
+            if delay:
+                await asyncio.sleep(delay)
+            room = self.rooms.get(room_code)
+            if room is None:
+                return
+            async with room.lock:
+                if room.state != RoomState.playing:
+                    return
+                if room.current_question != question_index:
+                    return
+                room.next_question_countdown_task = None
+                room.next_question_deadline = None
+            await self._open_question(room, question_index)
+        except asyncio.CancelledError:
+            return
 
     async def _round_timeout_watcher(self, room_code: str, question_index: int) -> None:
         try:
@@ -872,9 +928,27 @@ class RoomManager:
         if task and not task.done():
             task.cancel()
 
+    async def _cancel_next_question_countdown(self, room: RoomStateData) -> None:
+        task = room.next_question_countdown_task
+        room.next_question_countdown_task = None
+        room.next_question_deadline = None
+        if task and not task.done():
+            if task is asyncio.current_task():
+                return
+            task.cancel()
+
     async def send_current_question(self, room_code: str, player_id: str) -> None:
         room = self.rooms.get(room_code)
         if room is None or room.state != RoomState.playing:
+            return
+        if room.next_question_countdown_task and not room.next_question_countdown_task.done():
+            countdown = max(0, int((room.next_question_deadline or time.time()) - time.time()))
+            await self.send_to_player(
+                room_code,
+                player_id,
+                "next_question_starting",
+                self._next_question_countdown_payload(room, countdown),
+            )
             return
         if room.awaiting_next:
             await self.send_to_player(room_code, player_id, "awaiting_next", self._awaiting_next_payload(room))
@@ -948,6 +1022,7 @@ class RoomManager:
                         self.room_names.pop(room.room_name.lower(), None)
                         await self._cancel_round_timer(room)
                         await self._cancel_start_countdown(room)
+                        await self._cancel_next_question_countdown(room)
                         if room.host_grace_task and not room.host_grace_task.done():
                             room.host_grace_task.cancel()
 
@@ -965,6 +1040,7 @@ class RoomManager:
             self.room_names.pop(room.room_name.lower(), None)
             await self._cancel_round_timer(room)
             await self._cancel_start_countdown(room)
+            await self._cancel_next_question_countdown(room)
             if room.host_grace_task and not room.host_grace_task.done():
                 room.host_grace_task.cancel()
 
@@ -1038,6 +1114,13 @@ class RoomManager:
             "total_questions": total,
             "finished_after_continue": next_index >= total,
             "host_player_id": room.host_player_id,
+        }
+
+    def _next_question_countdown_payload(self, room: RoomStateData, countdown: int) -> dict[str, Any]:
+        return {
+            **self._awaiting_next_payload(room),
+            "countdown_seconds": max(0, int(countdown)),
+            "start_epoch": room.next_question_deadline,
         }
 
     def _question_public_payload(self, question: dict[str, Any]) -> dict[str, Any]:
