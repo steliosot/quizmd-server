@@ -81,6 +81,7 @@ class RoomStateData:
     collaborate_phase: str = "discussion"
     collaborate_retry_count: int = 0
     round_participants: set[str] = field(default_factory=set)
+    awaiting_next: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -355,6 +356,10 @@ class RoomManager:
             await self._handle_start_game(room, player_id)
             return
 
+        if event_type == "next_question":
+            await self._handle_next_question(room, player_id)
+            return
+
         if event_type == "chat_message":
             await self._handle_chat_message(room, player_id, payload)
             return
@@ -431,6 +436,7 @@ class RoomManager:
                 room.collaborate_retry_count = 0
                 room.start_countdown_task = None
                 room.start_deadline = None
+                room.awaiting_next = False
                 for p in room.players.values():
                     p.score = 0
                     p.ready = False
@@ -479,6 +485,14 @@ class RoomManager:
 
         async with room.lock:
             if room.state != RoomState.playing:
+                return
+            if room.awaiting_next:
+                await self.send_to_player(
+                    room.room_code,
+                    player_id,
+                    "error",
+                    {"message": "This round is complete. Wait for the host to continue."},
+                )
                 return
             if q_idx != room.current_question:
                 await self.send_to_player(
@@ -542,6 +556,7 @@ class RoomManager:
                 room.current_question = question_index
                 room.submissions = {}
                 room.round_participants = set(self._active_player_ids(room))
+                room.awaiting_next = False
                 if is_new_question:
                     room.collaborate_retry_count = 0
                 discussion_seconds = self._collaborate_discussion_seconds(room.questions[question_index])
@@ -599,8 +614,11 @@ class RoomManager:
         async with room.lock:
             if room.state != RoomState.playing:
                 return
+            if room.awaiting_next:
+                return
             q = room.questions[room.current_question]
             active = sorted(room.round_participants) if room.round_participants else self._active_player_ids(room)
+            await self._cancel_round_timer(room)
             deltas, correctness = compete_round_scores(
                 question=q,
                 submissions=room.submissions,
@@ -631,17 +649,21 @@ class RoomManager:
             }
 
             room.current_question += 1
+            room.awaiting_next = True
             room.updated_at = time.time()
 
         await self.broadcast(room.room_code, "round_result", payload)
         await self.broadcast(room.room_code, "scoreboard", self._scoreboard_payload(room))
-        await self._open_question(room, room.current_question)
+        await self.broadcast(room.room_code, "awaiting_next", self._awaiting_next_payload(room))
 
     async def _resolve_collaborate_round(self, room: RoomStateData, reason: str) -> None:
         async with room.lock:
             if room.state != RoomState.playing:
                 return
+            if room.awaiting_next:
+                return
             q = room.questions[room.current_question]
+            await self._cancel_round_timer(room)
             active = self._active_player_ids(room)
             passed, correctness, missing = collaborate_consensus(
                 question=q,
@@ -670,6 +692,7 @@ class RoomManager:
                 # Reset retry counter when consensus is reached before advancing.
                 room.collaborate_retry_count = 0
                 room.current_question += 1
+                room.awaiting_next = True
                 room.updated_at = time.time()
             else:
                 room.collaborate_retry_count += 1
@@ -695,15 +718,38 @@ class RoomManager:
                 if exceeded:
                     room.current_question += 1
                     room.collaborate_retry_count = 0
+                    room.awaiting_next = True
                 room.updated_at = time.time()
 
         if payload["status"] == "passed":
             await self.broadcast(room.room_code, "round_result", payload)
             await self.broadcast(room.room_code, "scoreboard", self._scoreboard_payload(room))
-            await self._open_question(room, room.current_question)
+            await self.broadcast(room.room_code, "awaiting_next", self._awaiting_next_payload(room))
             return
 
         await self.broadcast(room.room_code, "consensus_retry", payload)
+        if payload["status"] == "max_retries":
+            await self.broadcast(room.room_code, "awaiting_next", self._awaiting_next_payload(room))
+            return
+        await self._open_question(room, room.current_question)
+
+    async def _handle_next_question(self, room: RoomStateData, player_id: str) -> None:
+        async with room.lock:
+            player = room.players.get(player_id)
+            if player is None or not player.is_host:
+                raise HTTPException(status_code=403, detail="Only host can continue")
+            if room.state != RoomState.playing:
+                return
+            if not room.awaiting_next:
+                await self.send_to_player(
+                    room.room_code,
+                    player_id,
+                    "error",
+                    {"message": "There is no completed round to continue from yet."},
+                )
+                return
+            room.awaiting_next = False
+            room.updated_at = time.time()
         await self._open_question(room, room.current_question)
 
     async def _round_timeout_watcher(self, room_code: str, question_index: int) -> None:
@@ -805,6 +851,8 @@ class RoomManager:
         task = room.round_timeout_task
         room.round_timeout_task = None
         if task and not task.done():
+            if task is asyncio.current_task():
+                return
             task.cancel()
 
     async def _cancel_start_countdown(self, room: RoomStateData) -> None:
@@ -817,6 +865,9 @@ class RoomManager:
     async def send_current_question(self, room_code: str, player_id: str) -> None:
         room = self.rooms.get(room_code)
         if room is None or room.state != RoomState.playing:
+            return
+        if room.awaiting_next:
+            await self.send_to_player(room_code, player_id, "awaiting_next", self._awaiting_next_payload(room))
             return
         if room.current_question >= len(room.questions):
             return
@@ -944,6 +995,7 @@ class RoomManager:
             current_question=room.current_question,
             total_questions=len(room.questions),
             team_score=room.team_score,
+            awaiting_next=room.awaiting_next,
             players=players,
         )
 
@@ -966,6 +1018,16 @@ class RoomManager:
             "mode": room.mode.value,
             "team_score": room.team_score,
             "players": players,
+        }
+
+    def _awaiting_next_payload(self, room: RoomStateData) -> dict[str, Any]:
+        next_index = room.current_question
+        total = len(room.questions)
+        return {
+            "next_question_index": next_index,
+            "total_questions": total,
+            "finished_after_continue": next_index >= total,
+            "host_player_id": room.host_player_id,
         }
 
     def _question_public_payload(self, question: dict[str, Any]) -> dict[str, Any]:

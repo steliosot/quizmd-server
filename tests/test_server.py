@@ -262,6 +262,57 @@ class ServerTests(unittest.TestCase):
             players = {row["name"]: row["score"] for row in sb["payload"]["players"]}
             self.assertEqual(players["Hosty"], 3)
             self.assertEqual(players["Tom"], -3)
+            waiting = consume_until(ws_host, "awaiting_next")
+            self.assertTrue(waiting["payload"]["finished_after_continue"])
+            ws_host.send_json({"type": "next_question", "payload": {}})
+            finished = consume_until(ws_host, "game_finished")
+            self.assertEqual(finished["payload"]["state"], "finished")
+
+    def test_compete_waits_for_host_before_next_question(self):
+        payload = sample_quiz_payload(mode="compete")
+        payload["questions"].append(
+            {
+                "title": "Question 2",
+                "question": "3+3?",
+                "options": ["5", "6"],
+                "correct": [2],
+                "type": "single",
+                "time_limit": 30,
+                "discussion_time": None,
+                "explanation": "3+3 is 6",
+            }
+        )
+        create = self.client.post("/rooms", json=payload)
+        self.assertEqual(create.status_code, 200)
+        c = create.json()
+
+        def consume_until(ws, wanted_type: str, max_events: int = 50):
+            for _ in range(max_events):
+                msg = ws.receive_json()
+                if msg.get("type") == wanted_type:
+                    return msg
+            raise AssertionError(f"Did not receive {wanted_type}")
+
+        with self.client.websocket_connect(
+            f"/rooms/{c['room_code']}/ws?player_id={c['host_player_id']}&token={c['host_player_token']}"
+        ) as ws_host:
+            consume_until(ws_host, "connected")
+            ws_host.send_json({"type": "start_game", "payload": {}})
+            q1 = consume_until(ws_host, "question")
+            self.assertEqual(q1["payload"]["question_index"], 0)
+            ws_host.send_json({"type": "submit_answer", "payload": {"question_index": 0, "answers": [2]}})
+            consume_until(ws_host, "round_result")
+            consume_until(ws_host, "scoreboard")
+            waiting = consume_until(ws_host, "awaiting_next")
+            self.assertFalse(waiting["payload"]["finished_after_continue"])
+            self.assertEqual(waiting["payload"]["next_question_index"], 1)
+            room = manager.rooms[c["room_code"]]
+            self.assertTrue(room.awaiting_next)
+            self.assertEqual(room.current_question, 1)
+
+            ws_host.send_json({"type": "next_question", "payload": {}})
+            q2 = consume_until(ws_host, "question")
+            self.assertEqual(q2["payload"]["question_index"], 1)
 
     def test_start_game_broadcasts_countdown_before_question(self):
         manager.start_countdown_seconds = 5
@@ -664,6 +715,8 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(retry_2["payload"]["retry_count"], 2)
                 self.assertEqual(retry_2["payload"]["max_retries"], 2)
 
+                consume_until(ws_host, "awaiting_next")
+                ws_host.send_json({"type": "next_question", "payload": {}})
                 finished = consume_until(ws_host, "game_finished")
                 self.assertEqual(finished["payload"]["state"], "finished")
         finally:
@@ -719,6 +772,8 @@ class ServerTests(unittest.TestCase):
             ws_tom.send_json({"type": "submit_answer", "payload": {"question_index": 0, "answers": [2]}})
             consume_until(ws_host, "round_result")
             consume_until(ws_host, "scoreboard")
+            consume_until(ws_host, "awaiting_next")
+            ws_host.send_json({"type": "next_question", "payload": {}})
 
             q2 = consume_until(ws_host, "question")
             self.assertEqual(q2["payload"]["question_index"], 1)

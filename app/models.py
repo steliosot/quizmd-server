@@ -125,7 +125,7 @@ class JoinRoomResponse(BaseModel):
 class PlayerSnapshot(BaseModel):
     player_id: str
     name: str
-    score: int
+    score: int | float
     ready: bool
     connected: bool
     is_host: bool
@@ -140,6 +140,7 @@ class RoomSnapshot(BaseModel):
     current_question: int
     total_questions: int
     team_score: int
+    awaiting_next: bool = False
     players: list[PlayerSnapshot]
 
 
