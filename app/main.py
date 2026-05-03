@@ -78,6 +78,7 @@ async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoo
         questions=[q.model_dump() for q in payload.questions],
         host_name=payload.host_name,
         host_role=payload.host_role,
+        token_required=payload.token_required,
     )
 
     base = _public_base_url(request)
@@ -92,6 +93,7 @@ async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoo
         mode=created["mode"],
         join_url=f"{base}/join/{room_name}",
         ws_url=f"{ws_base}/rooms/{room_code}/ws",
+        token_required=created["token_required"],
         room_token=room_token,
         host_player_id=created["host_player_id"],
         host_player_token=created["host_player_token"],
@@ -104,7 +106,7 @@ async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoo
 async def join_room(room_code: str, request: Request, payload: JoinRoomRequest) -> JoinRoomResponse:
     joined = await manager.join_room(
         room_code=room_code,
-        room_token=payload.room_token,
+        room_token=payload.room_token or "",
         player_name=payload.player_name,
         role=payload.role,
     )
@@ -126,7 +128,7 @@ async def join_room(room_code: str, request: Request, payload: JoinRoomRequest) 
 async def join_room_by_name(room_name: str, request: Request, payload: JoinByNameRequest) -> JoinRoomResponse:
     joined = await manager.join_room_by_name(
         room_name=room_name,
-        room_token=payload.room_token,
+        room_token=payload.room_token or "",
         player_name=payload.player_name,
         role=payload.role,
     )
@@ -164,10 +166,15 @@ async def join_link_info(room_ref: str) -> JSONResponse:
             "room_name": room.room_name,
             "quiz_title": snapshot.quiz_title,
             "mode": snapshot.mode.value,
-            "token_required": True,
+            "token_required": room.token_required,
             "message": (
                 "Use quizmd to join (room token required): "
                 f'quizmd room --join "{room.room_name}" --token "<ROOM_TOKEN>" --name "YourName"'
+                if room.token_required
+                else (
+                    "Use quizmd to join: "
+                    f'quizmd room --join "{room.room_name}" --name "YourName"'
+                )
             ),
         }
     )
@@ -210,4 +217,4 @@ async def room_ws(room_code: str, websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("player disconnected room=%s player=%s", room_code, player_id)
     finally:
-        await manager.disconnect_player(room_code, player_id)
+        await manager.disconnect_player(room_code, player_id, websocket)

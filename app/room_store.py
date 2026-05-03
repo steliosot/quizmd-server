@@ -38,6 +38,7 @@ DEFAULT_QUESTION_TIMEOUT = _env_int("QUESTION_TIMEOUT_SECONDS", 30)
 ROOM_TTL_MINUTES = _env_int("ROOM_TTL_MINUTES", 30)
 HOST_REJOIN_SECONDS = _env_int("HOST_REJOIN_SECONDS", 60)
 COLLABORATE_MAX_RETRIES = max(1, _env_int("COLLABORATE_MAX_RETRIES", 3))
+COLLABORATE_DISCUSSION_SECONDS = max(0, _env_int("COLLABORATE_DISCUSSION_SECONDS", 40))
 
 
 @dataclass(slots=True)
@@ -58,6 +59,7 @@ class RoomStateData:
     room_code: str
     room_name: str
     room_token: str
+    token_required: bool
     mode: Mode
     quiz_title: str
     questions: list[dict[str, Any]]
@@ -73,8 +75,7 @@ class RoomStateData:
     round_timeout_task: asyncio.Task | None = None
     host_grace_task: asyncio.Task | None = None
     paused_remaining_seconds: int | None = None
-    boxing_score: int | None = None
-    boxing_scored_by: str | None = None
+    collaborate_phase: str = "discussion"
     collaborate_retry_count: int = 0
     round_participants: set[str] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -95,6 +96,7 @@ class RoomManager:
         questions: list[dict[str, Any]],
         host_name: str,
         host_role: RoomRole | None = None,
+        token_required: bool = False,
         room_name: str = "",
     ) -> dict[str, Any]:
         async with self.global_lock:
@@ -106,16 +108,11 @@ class RoomManager:
                 final_room_name = normalized_room_name
             else:
                 final_room_name = self._new_room_name()
-            room_token = self._new_token()
+            room_token = self._new_token() if token_required else ""
             host_player_id = self._new_id("p")
             host_token = self._new_token()
             name = host_name.strip() or generate_funny_name()
             resolved_host_role = RoomRole.participant
-            if mode == Mode.boxing:
-                if host_role in {RoomRole.teacher, RoomRole.student}:
-                    resolved_host_role = host_role
-                else:
-                    resolved_host_role = RoomRole.teacher
 
             host_player = PlayerState(
                 player_id=host_player_id,
@@ -130,6 +127,7 @@ class RoomManager:
                 room_code=room_code,
                 room_name=final_room_name,
                 room_token=room_token,
+                token_required=token_required,
                 mode=mode,
                 quiz_title=quiz_title,
                 questions=questions,
@@ -144,6 +142,7 @@ class RoomManager:
             "room_code": room_code,
             "room_name": final_room_name,
             "mode": mode,
+            "token_required": token_required,
             "room_token": room_token,
             "host_player_id": host_player_id,
             "host_player_token": host_token,
@@ -155,14 +154,17 @@ class RoomManager:
         self,
         *,
         room_code: str,
-        room_token: str,
+        room_token: str = "",
         player_name: str,
         role: RoomRole | None = None,
     ) -> dict[str, Any]:
         room = self.rooms.get(room_code)
         if room is None:
             raise HTTPException(status_code=404, detail="Room not found")
-        if room.room_token != room_token:
+        normalized_room_token = (room_token or "").strip()
+        if room.token_required and not normalized_room_token:
+            raise HTTPException(status_code=422, detail="Room token is required")
+        if room.token_required and room.room_token != normalized_room_token:
             raise HTTPException(status_code=403, detail="Invalid room token")
         return await self._join_room_internal(room=room, player_name=player_name, role=role)
 
@@ -170,7 +172,7 @@ class RoomManager:
         self,
         *,
         room_name: str,
-        room_token: str,
+        room_token: str = "",
         player_name: str,
         role: RoomRole | None = None,
     ) -> dict[str, Any]:
@@ -180,7 +182,10 @@ class RoomManager:
         room = self.rooms.get(room_code)
         if room is None:
             raise HTTPException(status_code=404, detail="Room not found")
-        if room.room_token != room_token:
+        normalized_room_token = (room_token or "").strip()
+        if room.token_required and not normalized_room_token:
+            raise HTTPException(status_code=422, detail="Room token is required")
+        if room.token_required and room.room_token != normalized_room_token:
             raise HTTPException(status_code=403, detail="Invalid room token")
         return await self._join_room_internal(room=room, player_name=player_name, role=role)
 
@@ -195,9 +200,7 @@ class RoomManager:
             if room.state == RoomState.finished:
                 raise HTTPException(status_code=410, detail="Room already finished")
 
-            if room.mode == Mode.boxing and len(room.players) >= 2:
-                raise HTTPException(status_code=409, detail="Room is full (boxing mode allows only 1 teacher + 1 student).")
-            if room.mode != Mode.boxing and len(room.players) >= MAX_PLAYERS:
+            if len(room.players) >= MAX_PLAYERS:
                 raise HTTPException(status_code=409, detail="Room is full")
 
             existing_names = [p.name for p in room.players.values()]
@@ -205,8 +208,6 @@ class RoomManager:
             player_id = self._new_id("p")
             token = self._new_token()
             assigned_role = RoomRole.participant
-            if room.mode == Mode.boxing:
-                assigned_role = self._resolve_boxing_join_role(room, role)
             room.players[player_id] = PlayerState(
                 player_id=player_id,
                 token=token,
@@ -261,6 +262,7 @@ class RoomManager:
 
     async def connect_player(self, room_code: str, player_id: str, websocket: WebSocket) -> None:
         room = self.rooms[room_code]
+        should_resume = False
         async with room.lock:
             player = room.players[player_id]
             player.connected = True
@@ -272,31 +274,41 @@ class RoomManager:
                 if room.host_grace_task and not room.host_grace_task.done():
                     room.host_grace_task.cancel()
                 room.host_grace_task = None
-                await self._resume_round_timer(room)
+                should_resume = True
 
         await self.send_to_player(room_code, player_id, "connected", self._snapshot_payload(room))
         await self.broadcast(room_code, "lobby_update", self._snapshot_payload(room))
+        if should_resume:
+            await self._resume_round_timer(room)
         if room.state == RoomState.playing:
             await self.send_current_question(room_code, player_id)
 
-    async def disconnect_player(self, room_code: str, player_id: str) -> None:
+    async def disconnect_player(self, room_code: str, player_id: str, websocket: WebSocket | None = None) -> None:
         room = self.rooms.get(room_code)
         if room is None:
             return
 
         should_broadcast = False
+        should_remove = False
         left_name = ""
         left_role = ""
         async with room.lock:
             player = room.players.get(player_id)
             if player is None:
                 return
-            if not player.connected and player_id not in self.connections.get(room_code, {}):
+            current_ws = self.connections.get(room_code, {}).get(player_id)
+            if websocket is not None and current_ws is not None and current_ws is not websocket:
+                # A stale socket from a previous browser/CLI connection closed after
+                # the player had already reconnected. Do not mark the live session
+                # disconnected.
+                return
+            if not player.connected and current_ws is None:
                 return
             player.connected = False
             player.ready = False
             player.last_seen = time.time()
-            self.connections.get(room_code, {}).pop(player_id, None)
+            if websocket is None or current_ws is websocket:
+                self.connections.get(room_code, {}).pop(player_id, None)
             should_broadcast = True
             left_name = player.name
             left_role = player.role.value
@@ -305,10 +317,13 @@ class RoomManager:
                 room.state = RoomState.paused
                 await self._pause_round_timer(room)
                 room.host_grace_task = asyncio.create_task(self._host_grace_watcher(room.room_code))
+            should_remove = room.state == RoomState.finished and not any(p.connected for p in room.players.values())
 
         if should_broadcast:
             await self.broadcast(room_code, "player_left", {"name": left_name, "role": left_role})
             await self.broadcast(room_code, "lobby_update", self._snapshot_payload(room))
+        if should_remove:
+            await self._remove_room_if_inactive(room_code)
 
     async def handle_event(self, room_code: str, player_id: str, event_type: str, payload: dict[str, Any]) -> None:
         room = self.rooms.get(room_code)
@@ -340,14 +355,6 @@ class RoomManager:
             await self._handle_chat_message(room, player_id, payload)
             return
 
-        if event_type == "set_score":
-            await self._handle_set_score(room, player_id, payload)
-            return
-
-        if event_type == "end_session":
-            await self._handle_end_session(room, player_id, payload)
-            return
-
         if event_type == "submit_answer":
             await self._handle_submit_answer(room, player_id, payload)
             return
@@ -365,6 +372,7 @@ class RoomManager:
         await self.broadcast(room.room_code, "lobby_update", self._snapshot_payload(room))
 
     async def _handle_start_game(self, room: RoomStateData, player_id: str) -> None:
+        error_message = ""
         async with room.lock:
             if room.players[player_id].is_host is False:
                 raise HTTPException(status_code=403, detail="Only host can start game")
@@ -373,49 +381,28 @@ class RoomManager:
 
             connected_players = [p for p in room.players.values() if p.connected]
             if len(connected_players) > 1 and not all(p.ready for p in connected_players):
-                await self.send_to_player(
-                    room.room_code,
-                    player_id,
-                    "error",
-                    {"message": "All connected players must be ready before starting."},
-                )
-                return
+                error_message = "All connected players must be ready before starting."
 
-            if room.mode == Mode.boxing:
-                connected_teachers = [
-                    p for p in connected_players if p.role == RoomRole.teacher
-                ]
-                connected_students = [
-                    p for p in connected_players if p.role == RoomRole.student
-                ]
-                if len(connected_teachers) != 1 or len(connected_students) != 1:
-                    await self.send_to_player(
-                        room.room_code,
-                        player_id,
-                        "error",
-                        {
-                            "message": (
-                                "Boxing mode requires exactly 1 connected teacher and 1 connected student."
-                            )
-                        },
-                    )
-                    return
+            if error_message:
+                room.updated_at = time.time()
+                room_code = room.room_code
+            else:
+                room_code = room.room_code
+                room.state = RoomState.playing
+                room.current_question = 0
+                room.team_score = 0
+                room.submissions = {}
+                room.collaborate_retry_count = 0
+                for p in room.players.values():
+                    p.score = 0
+                    p.ready = False
+                room.updated_at = time.time()
 
-            room.state = RoomState.playing
-            room.current_question = 0
-            room.team_score = 0
-            room.submissions = {}
-            room.boxing_score = None
-            room.boxing_scored_by = None
-            room.collaborate_retry_count = 0
-            for p in room.players.values():
-                p.score = 0
-                p.ready = False
-            room.updated_at = time.time()
+        if error_message:
+            await self.send_to_player(room_code, player_id, "error", {"message": error_message})
+            return
 
         await self.broadcast(room.room_code, "game_started", self._snapshot_payload(room))
-        if room.mode == Mode.boxing:
-            return
         await self._open_question(room, room.current_question)
 
     async def _handle_chat_message(self, room: RoomStateData, player_id: str, payload: dict[str, Any]) -> None:
@@ -438,78 +425,7 @@ class RoomManager:
             },
         )
 
-    async def _handle_set_score(self, room: RoomStateData, player_id: str, payload: dict[str, Any]) -> None:
-        if room.mode != Mode.boxing:
-            await self.send_to_player(room.room_code, player_id, "error", {"message": "Score command is only available in boxing mode."})
-            return
-        player = room.players.get(player_id)
-        if player is None:
-            return
-        if player.role != RoomRole.teacher:
-            await self.send_to_player(room.room_code, player_id, "error", {"message": "Only the teacher can set score in boxing mode."})
-            return
-        if room.state != RoomState.playing:
-            await self.send_to_player(room.room_code, player_id, "error", {"message": "Session is not active yet. Use /start first."})
-            return
-        try:
-            score = int(payload.get("score"))
-        except (TypeError, ValueError):
-            await self.send_to_player(room.room_code, player_id, "error", {"message": "Score must be an integer 0-100."})
-            return
-        if score < 0 or score > 100:
-            await self.send_to_player(room.room_code, player_id, "error", {"message": "Score must be between 0 and 100."})
-            return
-
-        async with room.lock:
-            room.boxing_score = score
-            room.boxing_scored_by = player_id
-            room.updated_at = time.time()
-
-        await self.broadcast(
-            room.room_code,
-            "boxing_score",
-            {
-                "score": score,
-                "by": player.name,
-                "by_role": player.role.value,
-                "ts": time.time(),
-            },
-        )
-
-    async def _handle_end_session(self, room: RoomStateData, player_id: str, payload: dict[str, Any]) -> None:
-        if room.mode != Mode.boxing:
-            await self.send_to_player(room.room_code, player_id, "error", {"message": "Session end command is only available in boxing mode."})
-            return
-        player = room.players.get(player_id)
-        if player is None:
-            return
-
-        async with room.lock:
-            if room.state == RoomState.finished:
-                return
-            room.state = RoomState.finished
-            room.updated_at = time.time()
-            await self._cancel_round_timer(room)
-            scored_by_name = ""
-            if room.boxing_scored_by:
-                scorer = room.players.get(room.boxing_scored_by)
-                if scorer:
-                    scored_by_name = scorer.name
-            payload_data = {
-                **self._snapshot_payload(room),
-                "reason": str(payload.get("reason") or "Session ended by participant."),
-                "ended_by": player.name,
-                "ended_by_role": player.role.value,
-                "final_score": room.boxing_score,
-                "scored_by": scored_by_name,
-            }
-
-        await self.broadcast(room.room_code, "game_finished", payload_data)
-
     async def _handle_submit_answer(self, room: RoomStateData, player_id: str, payload: dict[str, Any]) -> None:
-        if room.mode == Mode.boxing:
-            await self.send_to_player(room.room_code, player_id, "error", {"message": "Answer submissions are not used in boxing mode."})
-            return
         answers = payload.get("answers", [])
         if not isinstance(answers, list):
             await self.send_to_player(room.room_code, player_id, "error", {"message": "answers must be a list"})
@@ -536,6 +452,14 @@ class RoomManager:
                     {"message": f"Question mismatch. Current question is {room.current_question}."},
                 )
                 return
+            if room.mode == Mode.collaborate and room.collaborate_phase != "voting":
+                await self.send_to_player(
+                    room.room_code,
+                    player_id,
+                    "error",
+                    {"message": "Voting phase has not started yet. Discuss first, then vote."},
+                )
+                return
             if room.mode == Mode.compete and room.round_participants and player_id not in room.round_participants:
                 await self.send_to_player(
                     room.room_code,
@@ -555,7 +479,9 @@ class RoomManager:
             else:
                 target_players = set(self._active_player_ids(room))
             everyone_answered = all(pid in room.submissions for pid in target_players)
+            progress_payload = self._answer_progress_payload(room, target_players)
 
+        await self.broadcast(room.room_code, "answer_progress", progress_payload)
         if room.mode == Mode.compete and everyone_answered:
             await self._finalize_compete_round(room, reason="all_answered")
             return
@@ -565,36 +491,73 @@ class RoomManager:
             return
 
     async def _open_question(self, room: RoomStateData, question_index: int) -> None:
+        finish_payload: dict[str, Any] | None = None
+        payload: dict[str, Any] | None = None
         async with room.lock:
             if question_index >= len(room.questions):
                 room.state = RoomState.finished
                 await self._cancel_round_timer(room)
-                await self.broadcast(room.room_code, "game_finished", self._snapshot_payload(room))
-                return
+                room.updated_at = time.time()
+                finish_payload = self._snapshot_payload(room)
+                room_code = room.room_code
+            else:
+                room_code = room.room_code
+                is_new_question = question_index != room.current_question
+                room.current_question = question_index
+                room.submissions = {}
+                room.round_participants = set(self._active_player_ids(room))
+                if is_new_question:
+                    room.collaborate_retry_count = 0
+                discussion_seconds = self._collaborate_discussion_seconds(room.questions[question_index])
+                voting_seconds = self._collaborate_voting_seconds(room.questions[question_index])
+                if room.mode == Mode.collaborate and discussion_seconds > 0:
+                    room.collaborate_phase = "discussion"
+                    timeout_seconds = discussion_seconds
+                elif room.mode == Mode.collaborate:
+                    room.collaborate_phase = "voting"
+                    timeout_seconds = voting_seconds
+                else:
+                    room.collaborate_phase = "voting"
+                    timeout_seconds = voting_seconds
+                room.round_deadline = time.time() + timeout_seconds
+                room.updated_at = time.time()
+                await self._cancel_round_timer(room)
+                room.round_timeout_task = asyncio.create_task(self._round_timeout_watcher(room.room_code, question_index))
 
-            is_new_question = question_index != room.current_question
-            room.current_question = question_index
-            room.submissions = {}
-            room.round_participants = set(self._active_player_ids(room))
-            if is_new_question:
-                room.collaborate_retry_count = 0
-            timeout = room.questions[question_index].get("time_limit") or DEFAULT_QUESTION_TIMEOUT
-            room.round_deadline = time.time() + max(5, int(timeout))
-            room.updated_at = time.time()
-            await self._cancel_round_timer(room)
-            room.round_timeout_task = asyncio.create_task(self._round_timeout_watcher(room.room_code, question_index))
+                payload = {
+                    "question_index": room.current_question,
+                    "total_questions": len(room.questions),
+                    "mode": room.mode.value,
+                    "question": self._question_public_payload(room.questions[room.current_question]),
+                    "deadline_epoch": room.round_deadline,
+                    "phase": room.collaborate_phase if room.mode == Mode.collaborate else "voting",
+                    "discussion_seconds": discussion_seconds if room.mode == Mode.collaborate else 0,
+                    "voting_seconds": voting_seconds,
+                    "retry_count": room.collaborate_retry_count if room.mode == Mode.collaborate else 0,
+                    "max_retries": COLLABORATE_MAX_RETRIES if room.mode == Mode.collaborate else 0,
+                }
 
-            payload = {
-                "question_index": room.current_question,
-                "total_questions": len(room.questions),
-                "mode": room.mode.value,
-                "question": self._question_public_payload(room.questions[room.current_question]),
-                "deadline_epoch": room.round_deadline,
-                "retry_count": room.collaborate_retry_count if room.mode == Mode.collaborate else 0,
-                "max_retries": COLLABORATE_MAX_RETRIES if room.mode == Mode.collaborate else 0,
-            }
+        if finish_payload is not None:
+            await self.broadcast(room_code, "game_finished", finish_payload)
+            return
 
+        if payload is None:
+            return
         await self.broadcast(room.room_code, "question", payload)
+        if room.mode == Mode.collaborate:
+            await self.broadcast(
+                room.room_code,
+                "phase_changed",
+                {
+                    "question_index": question_index,
+                    "phase": payload["phase"],
+                    "deadline_epoch": payload["deadline_epoch"],
+                    "discussion_seconds": payload["discussion_seconds"],
+                    "voting_seconds": payload["voting_seconds"],
+                    "retry_count": payload["retry_count"],
+                    "max_retries": payload["max_retries"],
+                },
+            )
 
     async def _finalize_compete_round(self, room: RoomStateData, reason: str) -> None:
         async with room.lock:
@@ -732,6 +695,30 @@ class RoomManager:
             if room.mode == Mode.compete:
                 await self._finalize_compete_round(room, reason="timeout")
             elif room.mode == Mode.collaborate:
+                transition_payload: dict[str, Any] | None = None
+                async with room.lock:
+                    if room.state != RoomState.playing or room.current_question != question_index:
+                        return
+                    if room.collaborate_phase == "discussion":
+                        room.collaborate_phase = "voting"
+                        voting_seconds = self._collaborate_voting_seconds(room.questions[question_index])
+                        room.round_deadline = time.time() + voting_seconds
+                        room.updated_at = time.time()
+                        room.round_timeout_task = asyncio.create_task(
+                            self._round_timeout_watcher(room_code, question_index)
+                        )
+                        transition_payload = {
+                            "question_index": question_index,
+                            "phase": "voting",
+                            "deadline_epoch": room.round_deadline,
+                            "discussion_seconds": self._collaborate_discussion_seconds(room.questions[question_index]),
+                            "voting_seconds": voting_seconds,
+                            "retry_count": room.collaborate_retry_count,
+                            "max_retries": COLLABORATE_MAX_RETRIES,
+                        }
+                if transition_payload is not None:
+                    await self.broadcast(room_code, "phase_changed", transition_payload)
+                    return
                 await self._resolve_collaborate_round(room, reason="timeout")
         except asyncio.CancelledError:
             return
@@ -758,8 +745,6 @@ class RoomManager:
             return
 
     async def _pause_round_timer(self, room: RoomStateData) -> None:
-        if room.mode == Mode.boxing:
-            return
         if room.round_deadline is not None:
             room.paused_remaining_seconds = max(1, int(room.round_deadline - time.time()))
         else:
@@ -767,17 +752,18 @@ class RoomManager:
         await self._cancel_round_timer(room)
 
     async def _resume_round_timer(self, room: RoomStateData) -> None:
-        if room.mode == Mode.boxing:
-            return
-        if room.state != RoomState.playing:
-            return
-        if room.current_question >= len(room.questions):
-            return
-        remaining = room.paused_remaining_seconds or (room.questions[room.current_question].get("time_limit") or DEFAULT_QUESTION_TIMEOUT)
-        room.round_deadline = time.time() + max(1, int(remaining))
-        room.round_timeout_task = asyncio.create_task(self._round_timeout_watcher(room.room_code, room.current_question))
-        room.paused_remaining_seconds = None
-        await self.broadcast(room.room_code, "host_reconnected", self._snapshot_payload(room))
+        async with room.lock:
+            if room.state != RoomState.playing:
+                return
+            if room.current_question >= len(room.questions):
+                return
+            remaining = room.paused_remaining_seconds or (room.questions[room.current_question].get("time_limit") or DEFAULT_QUESTION_TIMEOUT)
+            room.round_deadline = time.time() + max(1, int(remaining))
+            room.round_timeout_task = asyncio.create_task(self._round_timeout_watcher(room.room_code, room.current_question))
+            room.paused_remaining_seconds = None
+            payload = self._snapshot_payload(room)
+            room_code = room.room_code
+        await self.broadcast(room_code, "host_reconnected", payload)
 
     async def _cancel_round_timer(self, room: RoomStateData) -> None:
         task = room.round_timeout_task
@@ -789,8 +775,6 @@ class RoomManager:
         room = self.rooms.get(room_code)
         if room is None or room.state != RoomState.playing:
             return
-        if room.mode == Mode.boxing:
-            return
         if room.current_question >= len(room.questions):
             return
         payload = {
@@ -799,6 +783,15 @@ class RoomManager:
             "mode": room.mode.value,
             "question": self._question_public_payload(room.questions[room.current_question]),
             "deadline_epoch": room.round_deadline,
+            "phase": room.collaborate_phase if room.mode == Mode.collaborate else "voting",
+            "discussion_seconds": (
+                self._collaborate_discussion_seconds(room.questions[room.current_question])
+                if room.mode == Mode.collaborate
+                else 0
+            ),
+            "voting_seconds": self._collaborate_voting_seconds(room.questions[room.current_question]),
+            "retry_count": room.collaborate_retry_count if room.mode == Mode.collaborate else 0,
+            "max_retries": COLLABORATE_MAX_RETRIES if room.mode == Mode.collaborate else 0,
         }
         await self.send_to_player(room_code, player_id, "question", payload)
 
@@ -813,19 +806,22 @@ class RoomManager:
 
     async def broadcast(self, room_code: str, event_type: str, payload: dict[str, Any]) -> None:
         room_connections = list(self.connections.get(room_code, {}).items())
-        stale: list[str] = []
+        stale: list[tuple[str, WebSocket]] = []
         for player_id, ws in room_connections:
             try:
                 await ws.send_json({"type": event_type, "payload": payload})
             except Exception:
-                stale.append(player_id)
+                stale.append((player_id, ws))
 
         if stale:
             room = self.rooms.get(room_code)
             if room is None:
                 return
             async with room.lock:
-                for player_id in stale:
+                for player_id, stale_ws in stale:
+                    current_ws = self.connections.get(room_code, {}).get(player_id)
+                    if current_ws is not stale_ws:
+                        continue
                     self.connections.get(room_code, {}).pop(player_id, None)
                     player = room.players.get(player_id)
                     if player:
@@ -850,8 +846,36 @@ class RoomManager:
                         if room.host_grace_task and not room.host_grace_task.done():
                             room.host_grace_task.cancel()
 
+    async def _remove_room_if_inactive(self, room_code: str) -> None:
+        async with self.global_lock:
+            room = self.rooms.get(room_code)
+            if room is None:
+                return
+            if room.state != RoomState.finished:
+                return
+            if any(player.connected for player in room.players.values()):
+                return
+            self.rooms.pop(room_code, None)
+            self.connections.pop(room_code, None)
+            self.room_names.pop(room.room_name.lower(), None)
+            await self._cancel_round_timer(room)
+            if room.host_grace_task and not room.host_grace_task.done():
+                room.host_grace_task.cancel()
+
     def _active_player_ids(self, room: RoomStateData) -> list[str]:
         return [pid for pid, player in room.players.items() if player.connected]
+
+    def _answer_progress_payload(self, room: RoomStateData, target_players: set[str]) -> dict[str, Any]:
+        total = len(target_players)
+        submitted = sum(1 for pid in target_players if pid in room.submissions)
+        remaining = max(0, total - submitted)
+        return {
+            "question_index": room.current_question,
+            "submitted": submitted,
+            "total": total,
+            "remaining": remaining,
+            "all_submitted": total > 0 and remaining == 0,
+        }
 
     def _snapshot_model(self, room: RoomStateData) -> RoomSnapshot:
         players = [
@@ -906,7 +930,24 @@ class RoomManager:
             "options": question.get("options", []),
             "type": question.get("type", "single"),
             "time_limit": question.get("time_limit") or DEFAULT_QUESTION_TIMEOUT,
+            "discussion_time": self._collaborate_discussion_seconds(question),
         }
+
+    def _collaborate_discussion_seconds(self, question: dict[str, Any]) -> int:
+        raw = question.get("discussion_time")
+        if raw in (None, ""):
+            return COLLABORATE_DISCUSSION_SECONDS
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return COLLABORATE_DISCUSSION_SECONDS
+
+    def _collaborate_voting_seconds(self, question: dict[str, Any]) -> int:
+        raw = question.get("time_limit") or DEFAULT_QUESTION_TIMEOUT
+        try:
+            return max(5, int(raw))
+        except (TypeError, ValueError):
+            return max(5, int(DEFAULT_QUESTION_TIMEOUT))
 
     def _new_room_code(self) -> str:
         while True:
@@ -942,23 +983,6 @@ class RoomManager:
         if not ROOM_NAME_RE.fullmatch(candidate):
             raise HTTPException(status_code=422, detail="room_name must be lowercase letters, numbers, and hyphens")
         return candidate
-
-    def _resolve_boxing_join_role(self, room: RoomStateData, requested_role: RoomRole | None) -> RoomRole:
-        if requested_role == RoomRole.participant:
-            raise HTTPException(status_code=422, detail="Boxing mode role must be teacher or student")
-        taken_roles = {p.role for p in room.players.values() if p.role in {RoomRole.teacher, RoomRole.student}}
-        if requested_role in {RoomRole.teacher, RoomRole.student}:
-            if requested_role in taken_roles:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Role '{requested_role.value}' is already taken in this boxing room.",
-                )
-            return requested_role
-        if RoomRole.teacher not in taken_roles:
-            return RoomRole.teacher
-        if RoomRole.student not in taken_roles:
-            return RoomRole.student
-        raise HTTPException(status_code=409, detail="Room is full (boxing mode allows only 1 teacher + 1 student).")
 
     @staticmethod
     def _new_token() -> str:

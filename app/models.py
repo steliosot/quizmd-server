@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class Mode(str, Enum):
     compete = "compete"
     collaborate = "collaborate"
-    boxing = "boxing"
 
 
 class RoomRole(str, Enum):
@@ -32,6 +31,7 @@ class QuizQuestionPayload(BaseModel):
     correct: list[int] = Field(min_length=1)
     type: Literal["single", "multiple"] = "single"
     time_limit: int | None = Field(default=30, ge=5, le=300)
+    discussion_time: int | None = Field(default=None, ge=0, le=300)
     explanation: str = ""
 
     @field_validator("options")
@@ -62,6 +62,7 @@ class CreateRoomRequest(BaseModel):
     questions: list[QuizQuestionPayload] = Field(min_length=1)
     host_name: str = ""
     host_role: RoomRole | None = None
+    token_required: bool = False
 
 
 class CreateRoomResponse(BaseModel):
@@ -70,6 +71,7 @@ class CreateRoomResponse(BaseModel):
     mode: Mode
     join_url: str
     ws_url: str
+    token_required: bool
     room_token: str
     host_player_id: str
     host_player_token: str
@@ -80,17 +82,33 @@ class CreateRoomResponse(BaseModel):
 class JoinRoomRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    room_token: str = Field(min_length=8)
+    room_token: str = ""
     player_name: str = ""
     role: RoomRole | None = None
+
+    @field_validator("room_token")
+    @classmethod
+    def _validate_room_token(cls, value: str) -> str:
+        token = value.strip()
+        if token and len(token) < 8:
+            raise ValueError("room_token must be at least 8 characters")
+        return token
 
 
 class JoinByNameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    room_token: str = Field(min_length=8)
+    room_token: str = ""
     player_name: str = ""
     role: RoomRole | None = None
+
+    @field_validator("room_token")
+    @classmethod
+    def _validate_room_token(cls, value: str) -> str:
+        token = value.strip()
+        if token and len(token) < 8:
+            raise ValueError("room_token must be at least 8 characters")
+        return token
 
 
 class JoinRoomResponse(BaseModel):
