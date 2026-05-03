@@ -81,6 +81,7 @@ class ServerTests(unittest.TestCase):
         manager.room_names.clear()
         manager.connections.clear()
         manager.start_countdown_seconds = 0
+        manager.next_question_countdown_seconds = 0
         self.client = TestClient(app)
 
     def test_create_and_join_room(self):
@@ -430,6 +431,53 @@ class ServerTests(unittest.TestCase):
         if room and room.start_countdown_task:
             room.start_countdown_task.cancel()
         manager.start_countdown_seconds = 0
+
+    def test_next_question_broadcasts_countdown_before_question(self):
+        manager.next_question_countdown_seconds = 5
+        payload = sample_quiz_payload(mode="compete")
+        payload["questions"].append(
+            {
+                "title": "Question 2",
+                "question": "3+3?",
+                "options": ["5", "6"],
+                "correct": [2],
+                "type": "single",
+                "time_limit": 30,
+                "discussion_time": None,
+                "explanation": "3+3 is 6",
+            }
+        )
+        create = self.client.post("/rooms", json=payload)
+        self.assertEqual(create.status_code, 200)
+        c = create.json()
+
+        def consume_until(ws, wanted_type: str, max_events: int = 50):
+            for _ in range(max_events):
+                msg = ws.receive_json()
+                if msg.get("type") == wanted_type:
+                    return msg
+            raise AssertionError(f"Did not receive {wanted_type}")
+
+        with self.client.websocket_connect(
+            f"/rooms/{c['room_code']}/ws?player_id={c['host_player_id']}&token={c['host_player_token']}"
+        ) as ws_host:
+            consume_until(ws_host, "connected")
+            ws_host.send_json({"type": "start_game", "payload": {}})
+            consume_until(ws_host, "question")
+            ws_host.send_json({"type": "submit_answer", "payload": {"question_index": 0, "answers": [2]}})
+            consume_until(ws_host, "round_result")
+            consume_until(ws_host, "awaiting_next")
+
+            ws_host.send_json({"type": "next_question", "payload": {}})
+            starting = consume_until(ws_host, "next_question_starting")
+            self.assertEqual(starting["payload"]["countdown_seconds"], 5)
+            self.assertEqual(starting["payload"]["next_question_index"], 1)
+            self.assertIn("start_epoch", starting["payload"])
+
+        room = manager.rooms.get(c["room_code"])
+        if room and room.next_question_countdown_task:
+            room.next_question_countdown_task.cancel()
+        manager.next_question_countdown_seconds = 0
 
     def test_reconnected_non_host_gets_current_question(self):
         create = self.client.post("/rooms", json=sample_quiz_payload())
