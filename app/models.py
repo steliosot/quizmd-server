@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -34,6 +35,13 @@ class QuizQuestionPayload(BaseModel):
     points: float = Field(default=1, gt=0)
     discussion_time: int | None = Field(default=None, ge=0, le=300)
     explanation: str = ""
+
+    @field_validator("points")
+    @classmethod
+    def _validate_points_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("points must be finite")
+        return value
 
     @field_validator("options")
     @classmethod

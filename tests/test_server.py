@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import sys
 import time
 import unittest
@@ -208,6 +209,17 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(correctness["slow"])
         self.assertFalse(correctness["wrong"])
 
+    def test_compete_round_scoring_ignores_nonfinite_question_value(self):
+        for value in (math.nan, math.inf):
+            with self.subTest(value=value):
+                deltas, correctness = compete_round_scores(
+                    question={"correct": [1], "points": value, "time_limit": 10, "deadline_epoch": 10.0},
+                    submissions={"tom": Submission(player_id="tom", answers=[1], ts=5.0)},
+                    active_player_ids=["tom"],
+                )
+                self.assertEqual(deltas["tom"], 1.12)
+                self.assertTrue(correctness["tom"])
+
     def test_compete_round_scores_aggregate_different_question_values(self):
         totals = {"tom": 0.0, "maya": 0.0}
         q1 = {"correct": [1], "points": 5, "time_limit": 10, "deadline_epoch": 10.0}
@@ -317,6 +329,34 @@ class ServerTests(unittest.TestCase):
             ws_host.send_json({"type": "next_question", "payload": {}})
             finished = consume_until(ws_host, "game_finished")
             self.assertEqual(finished["payload"]["state"], "finished")
+
+    def test_websocket_submit_answer_rejects_invalid_question_index_cleanly(self):
+        create = self.client.post("/rooms", json=sample_quiz_payload())
+        self.assertEqual(create.status_code, 200)
+        c = create.json()
+
+        def consume_until(ws, wanted_type: str, max_events: int = 50):
+            for _ in range(max_events):
+                msg = ws.receive_json()
+                if msg.get("type") == wanted_type:
+                    return msg
+            raise AssertionError(f"Did not receive {wanted_type}")
+
+        with self.client.websocket_connect(
+            f"/rooms/{c['room_code']}/ws?player_id={c['host_player_id']}&token={c['host_player_token']}"
+        ) as ws_host:
+            consume_until(ws_host, "connected")
+            ws_host.send_json({"type": "ready_toggle", "payload": {"ready": True}})
+            ws_host.send_json({"type": "start_game", "payload": {}})
+            consume_until(ws_host, "question")
+
+            ws_host.send_json({"type": "submit_answer", "payload": {"question_index": "not-a-number", "answers": [2]}})
+            error = consume_until(ws_host, "error")
+            self.assertEqual(error["payload"]["message"], "question_index must be an integer")
+
+            # The socket should still be usable after the bad payload.
+            ws_host.send_json({"type": "ping", "payload": {}})
+            consume_until(ws_host, "pong")
 
     def test_compete_waits_for_host_before_next_question(self):
         payload = sample_quiz_payload(mode="compete")

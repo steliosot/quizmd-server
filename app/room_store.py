@@ -481,7 +481,16 @@ class RoomManager:
             await self.send_to_player(room.room_code, player_id, "error", {"message": "answers must be integer indexes"})
             return
 
-        q_idx = int(payload.get("question_index", room.current_question))
+        try:
+            q_idx = int(payload.get("question_index", room.current_question))
+        except (TypeError, ValueError):
+            await self.send_to_player(
+                room.room_code,
+                player_id,
+                "error",
+                {"message": "question_index must be an integer"},
+            )
+            return
 
         async with room.lock:
             if room.state != RoomState.playing:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 
@@ -29,6 +30,8 @@ def compete_round_scores(
     try:
         question_points = float(question.get("points", 1) or 1)
     except (TypeError, ValueError):
+        question_points = 1.0
+    if not math.isfinite(question_points):
         question_points = 1.0
     question_points = max(0.0, question_points)
     try:
