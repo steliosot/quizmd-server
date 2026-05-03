@@ -79,6 +79,7 @@ async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoo
         host_name=payload.host_name,
         host_role=payload.host_role,
         token_required=payload.token_required,
+        advance_mode=payload.advance_mode,
     )
 
     base = _public_base_url(request)
@@ -99,6 +100,7 @@ async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoo
         host_player_token=created["host_player_token"],
         host_display_name=created["host_display_name"],
         host_role=created["host_role"],
+        advance_mode=created["advance_mode"],
     )
 
 

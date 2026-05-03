@@ -21,12 +21,13 @@ from app.main import app, manager
 from app.room_store import RoomManager
 
 
-def sample_quiz_payload(mode: str = "compete", token_required: bool = False):
+def sample_quiz_payload(mode: str = "compete", token_required: bool = False, advance_mode: str = "manual"):
     discussion_time = 0 if mode == "collaborate" else None
     return {
         "mode": mode,
         "room_name": "",
         "token_required": token_required,
+        "advance_mode": advance_mode,
         "quiz_title": "Sample Quiz",
         "host_name": "Hosty",
         "questions": [
@@ -48,6 +49,7 @@ def sample_two_question_collaborate_payload():
     return {
         "mode": "collaborate",
         "room_name": "",
+        "advance_mode": "manual",
         "quiz_title": "Two Question Collaborate",
         "host_name": "Hosty",
         "questions": [
@@ -96,6 +98,7 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(data["token_required"])
         self.assertEqual(data["room_name"], "berlin-elephant")
         self.assertEqual(data["host_role"], "participant")
+        self.assertEqual(data["advance_mode"], "manual")
 
         join = self.client.post(
             f"/rooms/{data['room_code']}/join",
@@ -107,6 +110,18 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(joined["player_id"].startswith("p_"))
         self.assertEqual(joined["mode"], "compete")
         self.assertEqual(joined["player_role"], "participant")
+
+    def test_create_room_defaults_to_auto_advance_when_omitted(self):
+        payload = sample_quiz_payload()
+        payload["room_name"] = "auto-room"
+        payload.pop("advance_mode", None)
+        create = self.client.post("/rooms", json=payload)
+        self.assertEqual(create.status_code, 200)
+        data = create.json()
+        self.assertEqual(data["advance_mode"], "auto")
+        snapshot = self.client.get(f"/rooms/{data['room_code']}")
+        self.assertEqual(snapshot.status_code, 200)
+        self.assertEqual(snapshot.json()["advance_mode"], "auto")
 
         join_by_name = self.client.post(
             f"/rooms/by-name/{data['room_name']}/join",
@@ -473,6 +488,49 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(starting["payload"]["countdown_seconds"], 5)
             self.assertEqual(starting["payload"]["next_question_index"], 1)
             self.assertIn("start_epoch", starting["payload"])
+
+        room = manager.rooms.get(c["room_code"])
+        if room and room.next_question_countdown_task:
+            room.next_question_countdown_task.cancel()
+        manager.next_question_countdown_seconds = 0
+
+    def test_auto_advance_broadcasts_countdown_without_host_next(self):
+        manager.next_question_countdown_seconds = 5
+        payload = sample_quiz_payload(mode="compete", advance_mode="auto")
+        payload["questions"].append(
+            {
+                "title": "Question 2",
+                "question": "3+3?",
+                "options": ["5", "6"],
+                "correct": [2],
+                "type": "single",
+                "time_limit": 30,
+                "discussion_time": None,
+                "explanation": "3+3 is 6",
+            }
+        )
+        create = self.client.post("/rooms", json=payload)
+        self.assertEqual(create.status_code, 200)
+        c = create.json()
+
+        def consume_until(ws, wanted_type: str, max_events: int = 50):
+            for _ in range(max_events):
+                msg = ws.receive_json()
+                if msg.get("type") == wanted_type:
+                    return msg
+            raise AssertionError(f"Did not receive {wanted_type}")
+
+        with self.client.websocket_connect(
+            f"/rooms/{c['room_code']}/ws?player_id={c['host_player_id']}&token={c['host_player_token']}"
+        ) as ws_host:
+            consume_until(ws_host, "connected")
+            ws_host.send_json({"type": "start_game", "payload": {}})
+            consume_until(ws_host, "question")
+            ws_host.send_json({"type": "submit_answer", "payload": {"question_index": 0, "answers": [2]}})
+            consume_until(ws_host, "round_result")
+            starting = consume_until(ws_host, "next_question_starting")
+            self.assertEqual(starting["payload"]["countdown_seconds"], 5)
+            self.assertEqual(starting["payload"]["next_question_index"], 1)
 
         room = manager.rooms.get(c["room_code"])
         if room and room.next_question_countdown_task:

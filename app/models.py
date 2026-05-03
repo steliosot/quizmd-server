@@ -12,6 +12,11 @@ class Mode(str, Enum):
     collaborate = "collaborate"
 
 
+class AdvanceMode(str, Enum):
+    auto = "auto"
+    manual = "manual"
+
+
 class RoomRole(str, Enum):
     participant = "participant"
     teacher = "teacher"
@@ -72,6 +77,7 @@ class CreateRoomRequest(BaseModel):
     host_name: str = ""
     host_role: RoomRole | None = None
     token_required: bool = False
+    advance_mode: AdvanceMode = AdvanceMode.auto
 
 
 class CreateRoomResponse(BaseModel):
@@ -86,6 +92,7 @@ class CreateRoomResponse(BaseModel):
     host_player_token: str
     host_display_name: str
     host_role: RoomRole
+    advance_mode: AdvanceMode
 
 
 class JoinRoomRequest(BaseModel):
@@ -150,6 +157,7 @@ class RoomSnapshot(BaseModel):
     total_questions: int
     team_score: int
     awaiting_next: bool = False
+    advance_mode: AdvanceMode = AdvanceMode.auto
     players: list[PlayerSnapshot]
 
 

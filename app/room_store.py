@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import HTTPException, WebSocket
 
 from .game_engine import Submission, collaborate_consensus, compete_round_scores
-from .models import Mode, PlayerSnapshot, RoomRole, RoomSnapshot, RoomState
+from .models import AdvanceMode, Mode, PlayerSnapshot, RoomRole, RoomSnapshot, RoomState
 from .namegen import ensure_unique_name, generate_funny_name
 
 ROOM_CODE_LEN = 8
@@ -67,6 +67,7 @@ class RoomStateData:
     room_token: str
     token_required: bool
     mode: Mode
+    advance_mode: AdvanceMode
     quiz_title: str
     questions: list[dict[str, Any]]
     host_player_id: str
@@ -110,6 +111,7 @@ class RoomManager:
         host_name: str,
         host_role: RoomRole | None = None,
         token_required: bool = False,
+        advance_mode: AdvanceMode = AdvanceMode.auto,
         room_name: str = "",
     ) -> dict[str, Any]:
         async with self.global_lock:
@@ -142,6 +144,7 @@ class RoomManager:
                 room_token=room_token,
                 token_required=token_required,
                 mode=mode,
+                advance_mode=advance_mode,
                 quiz_title=quiz_title,
                 questions=questions,
                 host_player_id=host_player_id,
@@ -155,6 +158,7 @@ class RoomManager:
             "room_code": room_code,
             "room_name": final_room_name,
             "mode": mode,
+            "advance_mode": advance_mode,
             "token_required": token_required,
             "room_token": room_token,
             "host_player_id": host_player_id,
@@ -636,6 +640,7 @@ class RoomManager:
             )
 
     async def _finalize_compete_round(self, room: RoomStateData, reason: str) -> None:
+        should_auto_advance = False
         async with room.lock:
             if room.state != RoomState.playing:
                 return
@@ -676,13 +681,18 @@ class RoomManager:
 
             room.current_question += 1
             room.awaiting_next = True
+            should_auto_advance = room.advance_mode == AdvanceMode.auto
             room.updated_at = time.time()
 
         await self.broadcast(room.room_code, "round_result", payload)
         await self.broadcast(room.room_code, "scoreboard", self._scoreboard_payload(room))
-        await self.broadcast(room.room_code, "awaiting_next", self._awaiting_next_payload(room))
+        if should_auto_advance:
+            await self._continue_after_round(room)
+        else:
+            await self.broadcast(room.room_code, "awaiting_next", self._awaiting_next_payload(room))
 
     async def _resolve_collaborate_round(self, room: RoomStateData, reason: str) -> None:
+        should_auto_advance = False
         async with room.lock:
             if room.state != RoomState.playing:
                 return
@@ -719,6 +729,7 @@ class RoomManager:
                 room.collaborate_retry_count = 0
                 room.current_question += 1
                 room.awaiting_next = True
+                should_auto_advance = room.advance_mode == AdvanceMode.auto
                 room.updated_at = time.time()
             else:
                 room.collaborate_retry_count += 1
@@ -745,23 +756,28 @@ class RoomManager:
                     room.current_question += 1
                     room.collaborate_retry_count = 0
                     room.awaiting_next = True
+                    should_auto_advance = room.advance_mode == AdvanceMode.auto
                 room.updated_at = time.time()
 
         if payload["status"] == "passed":
             await self.broadcast(room.room_code, "round_result", payload)
             await self.broadcast(room.room_code, "scoreboard", self._scoreboard_payload(room))
-            await self.broadcast(room.room_code, "awaiting_next", self._awaiting_next_payload(room))
+            if should_auto_advance:
+                await self._continue_after_round(room)
+            else:
+                await self.broadcast(room.room_code, "awaiting_next", self._awaiting_next_payload(room))
             return
 
         await self.broadcast(room.room_code, "consensus_retry", payload)
         if payload["status"] == "max_retries":
-            await self.broadcast(room.room_code, "awaiting_next", self._awaiting_next_payload(room))
+            if should_auto_advance:
+                await self._continue_after_round(room)
+            else:
+                await self.broadcast(room.room_code, "awaiting_next", self._awaiting_next_payload(room))
             return
         await self._open_question(room, room.current_question)
 
     async def _handle_next_question(self, room: RoomStateData, player_id: str) -> None:
-        countdown_payload: dict[str, Any] | None = None
-        open_immediately = False
         async with room.lock:
             player = room.players.get(player_id)
             if player is None or not player.is_host:
@@ -777,6 +793,18 @@ class RoomManager:
                     "error",
                     {"message": "There is no completed round to continue from yet."},
                 )
+                return
+        await self._continue_after_round(room)
+
+    async def _continue_after_round(self, room: RoomStateData) -> None:
+        countdown_payload: dict[str, Any] | None = None
+        open_immediately = False
+        async with room.lock:
+            if room.state != RoomState.playing:
+                return
+            if room.next_question_countdown_task and not room.next_question_countdown_task.done():
+                return
+            if not room.awaiting_next:
                 return
             room.awaiting_next = False
             if room.current_question >= len(room.questions):
@@ -1082,6 +1110,7 @@ class RoomManager:
             total_questions=len(room.questions),
             team_score=room.team_score,
             awaiting_next=room.awaiting_next,
+            advance_mode=room.advance_mode,
             players=players,
         )
 
@@ -1114,6 +1143,7 @@ class RoomManager:
             "total_questions": total,
             "finished_after_continue": next_index >= total,
             "host_player_id": room.host_player_id,
+            "advance_mode": room.advance_mode.value,
         }
 
     def _next_question_countdown_payload(self, room: RoomStateData, countdown: int) -> dict[str, Any]:
