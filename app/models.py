@@ -9,13 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class Mode(str, Enum):
     compete = "compete"
     collaborate = "collaborate"
-    boxing = "boxing"
-
-
-class RoomRole(str, Enum):
-    participant = "participant"
-    teacher = "teacher"
-    student = "student"
+    eliminate = "eliminate"
 
 
 class RoomState(str, Enum):
@@ -25,6 +19,11 @@ class RoomState(str, Enum):
     finished = "finished"
 
 
+class AdvanceMode(str, Enum):
+    auto = "auto"
+    manual = "manual"
+
+
 class QuizQuestionPayload(BaseModel):
     title: str = Field(default="Question")
     question: str = Field(min_length=1)
@@ -32,6 +31,7 @@ class QuizQuestionPayload(BaseModel):
     correct: list[int] = Field(min_length=1)
     type: Literal["single", "multiple"] = "single"
     time_limit: int | None = Field(default=30, ge=5, le=300)
+    points: float = Field(default=1.0, gt=0)
     explanation: str = ""
 
     @field_validator("options")
@@ -61,7 +61,8 @@ class CreateRoomRequest(BaseModel):
     quiz_title: str = Field(min_length=1)
     questions: list[QuizQuestionPayload] = Field(min_length=1)
     host_name: str = ""
-    host_role: RoomRole | None = None
+    token_required: bool = True
+    advance_mode: AdvanceMode = AdvanceMode.auto
 
 
 class CreateRoomResponse(BaseModel):
@@ -70,27 +71,25 @@ class CreateRoomResponse(BaseModel):
     mode: Mode
     join_url: str
     ws_url: str
+    token_required: bool = True
     room_token: str
     host_player_id: str
     host_player_token: str
     host_display_name: str
-    host_role: RoomRole
 
 
 class JoinRoomRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    room_token: str = Field(min_length=8)
+    room_token: str = ""
     player_name: str = ""
-    role: RoomRole | None = None
 
 
 class JoinByNameRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    room_token: str = Field(min_length=8)
+    room_token: str = ""
     player_name: str = ""
-    role: RoomRole | None = None
 
 
 class JoinRoomResponse(BaseModel):
@@ -101,24 +100,25 @@ class JoinRoomResponse(BaseModel):
     player_token: str
     display_name: str
     ws_url: str
-    player_role: RoomRole
 
 
 class PlayerSnapshot(BaseModel):
     player_id: str
     name: str
-    score: int
+    score: float
+    eliminated: bool = False
     ready: bool
     connected: bool
     is_host: bool
-    role: RoomRole
 
 
 class RoomSnapshot(BaseModel):
     room_code: str
+    room_name: str
     mode: Mode
     state: RoomState
     quiz_title: str
+    token_required: bool = True
     current_question: int
     total_questions: int
     team_score: int
