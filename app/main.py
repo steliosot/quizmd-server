@@ -77,7 +77,8 @@ async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoo
         quiz_title=payload.quiz_title,
         questions=[q.model_dump() for q in payload.questions],
         host_name=payload.host_name,
-        host_role=payload.host_role,
+        token_required=payload.token_required,
+        advance_mode=payload.advance_mode,
     )
 
     base = _public_base_url(request)
@@ -92,11 +93,11 @@ async def create_room(request: Request, payload: CreateRoomRequest) -> CreateRoo
         mode=created["mode"],
         join_url=f"{base}/join/{room_name}",
         ws_url=f"{ws_base}/rooms/{room_code}/ws",
+        token_required=created["token_required"],
         room_token=room_token,
         host_player_id=created["host_player_id"],
         host_player_token=created["host_player_token"],
         host_display_name=created["host_display_name"],
-        host_role=created["host_role"],
     )
 
 
@@ -106,7 +107,6 @@ async def join_room(room_code: str, request: Request, payload: JoinRoomRequest) 
         room_code=room_code,
         room_token=payload.room_token,
         player_name=payload.player_name,
-        role=payload.role,
     )
 
     ws_base = _ws_base_url(_public_base_url(request))
@@ -118,7 +118,6 @@ async def join_room(room_code: str, request: Request, payload: JoinRoomRequest) 
         player_token=joined["player_token"],
         display_name=joined["display_name"],
         ws_url=f"{ws_base}/rooms/{room_code}/ws",
-        player_role=joined["player_role"],
     )
 
 
@@ -128,7 +127,6 @@ async def join_room_by_name(room_name: str, request: Request, payload: JoinByNam
         room_name=room_name,
         room_token=payload.room_token,
         player_name=payload.player_name,
-        role=payload.role,
     )
 
     ws_base = _ws_base_url(_public_base_url(request))
@@ -140,7 +138,6 @@ async def join_room_by_name(room_name: str, request: Request, payload: JoinByNam
         player_token=joined["player_token"],
         display_name=joined["display_name"],
         ws_url=f"{ws_base}/rooms/{joined['room_code']}/ws",
-        player_role=joined["player_role"],
     )
 
 
@@ -164,10 +161,14 @@ async def join_link_info(room_ref: str) -> JSONResponse:
             "room_name": room.room_name,
             "quiz_title": snapshot.quiz_title,
             "mode": snapshot.mode.value,
-            "token_required": True,
+            "token_required": snapshot.token_required,
             "message": (
-                "Use quizmd to join (room token required): "
-                f'quizmd room --join "{room.room_name}" --token "<ROOM_TOKEN>" --name "YourName"'
+                (
+                    "Use quizmd to join (room token required): "
+                    f'quizmd room --join "{room.room_name}" --token "<ROOM_TOKEN>" --name "YourName"'
+                )
+                if snapshot.token_required
+                else f'Use quizmd to join: quizmd room --join "{room.room_name}" --name "YourName"'
             ),
         }
     )
@@ -210,4 +211,4 @@ async def room_ws(room_code: str, websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("player disconnected room=%s player=%s", room_code, player_id)
     finally:
-        await manager.disconnect_player(room_code, player_id)
+        await manager.disconnect_player(room_code, player_id, websocket)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 
@@ -21,31 +22,48 @@ def compete_round_scores(
     question: dict[str, Any],
     submissions: dict[str, Submission],
     active_player_ids: list[str],
-    wrong_penalty: int = -3,
-) -> tuple[dict[str, int], dict[str, bool]]:
+    deadline_epoch: float | None = None,
+) -> tuple[dict[str, float], dict[str, bool]]:
     """Return (score_delta_by_player, correctness_by_player)."""
-    score_delta = {pid: 0 for pid in active_player_ids}
+    score_delta = {pid: 0.0 for pid in active_player_ids}
     correctness = {pid: False for pid in active_player_ids}
 
-    ranked_correct: list[Submission] = []
+    try:
+        question_value = float(question.get("points", 1))
+    except (TypeError, ValueError):
+        question_value = 1.0
+    if not math.isfinite(question_value) or question_value <= 0:
+        question_value = 1.0
+
+    try:
+        time_limit = float(question.get("time_limit", 30))
+    except (TypeError, ValueError):
+        time_limit = 30.0
+    if not math.isfinite(time_limit) or time_limit <= 0:
+        time_limit = 30.0
+
     for pid in active_player_ids:
         sub = submissions.get(pid)
         if sub is None:
-            # timeout/no submission is treated as wrong penalty in compete mode
-            score_delta[pid] += wrong_penalty
             continue
+        if deadline_epoch is not None:
+            try:
+                if float(sub.ts) > float(deadline_epoch):
+                    continue
+            except (TypeError, ValueError):
+                continue
 
         is_correct = answer_is_correct(question, sub.answers)
         correctness[pid] = is_correct
         if is_correct:
-            ranked_correct.append(sub)
-        else:
-            score_delta[pid] += wrong_penalty
-
-    ranked_correct.sort(key=lambda x: x.ts)
-    podium = [3, 2, 1]
-    for idx, sub in enumerate(ranked_correct[:3]):
-        score_delta[sub.player_id] += podium[idx]
+            time_left = 0.0
+            if deadline_epoch is not None:
+                try:
+                    time_left = max(0.0, min(time_limit, float(deadline_epoch) - float(sub.ts)))
+                except (TypeError, ValueError):
+                    time_left = 0.0
+            bonus = (question_value / 4.0) * (time_left / time_limit)
+            score_delta[pid] = round(question_value + bonus, 2)
 
     return score_delta, correctness
 

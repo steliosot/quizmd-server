@@ -8,8 +8,9 @@ Backend multiplayer server for QuizMD rooms (Cloud Run ready).
 - Real-time gameplay via WebSockets
 - Host-authoritative state and scoring
 - Modes:
-  - `compete`: top 3 fastest correct answers score `3,2,1`; wrong `-3`
+  - `compete`: correct answers earn base points plus a small capped time bonus; wrong answers score `0`
   - `collaborate`: unanimous correct required, otherwise retry same question
+  - `eliminate`: compete-style scoring, but wrong answers eliminate players from future scoring
 - Random funny default names with uniqueness handling
 - Single-instance in-memory state (v1)
 
