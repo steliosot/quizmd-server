@@ -11,8 +11,9 @@ Backend multiplayer server for QuizMD rooms (Cloud Run ready).
   - `compete`: correct answers earn base points plus a small capped time bonus; wrong answers score `0`
   - `collaborate`: unanimous correct required, otherwise retry same question
   - `eliminate`: compete-style scoring, but wrong answers eliminate players from future scoring
+- Room progress events for submitted counts, result screens, scoreboards, and final results
 - Random funny default names with uniqueness handling
-- Single-instance in-memory state (v1)
+- Single-instance in-memory state (v1); finished rooms are removed after final results
 
 ## Project Structure
 
@@ -55,6 +56,8 @@ curl -X POST http://127.0.0.1:8080/rooms \
     "mode": "compete",
     "quiz_title": "Demo Quiz",
     "host_name": "Host",
+    "token_required": false,
+    "advance_mode": "auto",
     "questions": [
       {
         "title": "Question 1",
@@ -74,8 +77,10 @@ Join room:
 ```bash
 curl -X POST http://127.0.0.1:8080/rooms/<ROOM_CODE>/join \
   -H 'content-type: application/json' \
-  -d '{"room_token":"<ROOM_TOKEN>","player_name":"Mary"}'
+  -d '{"player_name":"Mary"}'
 ```
+
+For token-protected rooms, include `"room_token":"<ROOM_TOKEN>"` in the join payload.
 
 WebSocket endpoint:
 
@@ -87,11 +92,27 @@ Client events:
 
 - `ready_toggle` payload `{ "ready": true }`
 - `start_game` payload `{}`
+- `next_question` payload `{}` for manual-advance host rooms
 - `submit_answer` payload `{ "question_index": 0, "answers": [2] }`
+- `chat_message` payload `{ "text": "hello" }`
 - `ping` payload `{}`
 - `leave_room` payload `{}`
 
-## Cloud Run Deploy (us-central1)
+Common server events:
+
+- `connected`
+- `lobby_update`
+- `game_starting`
+- `game_started`
+- `question`
+- `answer_progress`
+- `round_result`
+- `scoreboard`
+- `waiting_for_next_question`
+- `game_finished`
+- `error`
+
+## Cloud Run Deploy (europe-west1)
 
 Prerequisites:
 
@@ -111,7 +132,7 @@ gcloud config set project <YOUR_PROJECT_ID>
 
 gcloud run deploy quizmd-server \
   --source . \
-  --region us-central1 \
+  --region europe-west1 \
   --allow-unauthenticated \
   --port 8080 \
   --min-instances 1 \
@@ -124,7 +145,7 @@ Optional public URL override (for join links):
 
 ```bash
 gcloud run services update quizmd-server \
-  --region us-central1 \
+  --region europe-west1 \
   --set-env-vars QUIZMD_PUBLIC_BASE_URL=https://<your-service-url>
 ```
 
@@ -139,13 +160,13 @@ In Cloud Run UI ("Set up with Cloud Build"):
 3. Build type: Dockerfile (repo root)
 4. Build config file: `cloudbuild.yaml`
 5. Service name: `quizmd-server`
-6. Region: `us-central1`
+6. Region: `europe-west1`
 
 After first deploy, set:
 
 ```bash
 gcloud run services update quizmd-server \
-  --region us-central1 \
+  --region europe-west1 \
   --set-env-vars QUIZMD_PUBLIC_BASE_URL=https://<cloud-run-service-url>
 ```
 

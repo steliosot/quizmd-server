@@ -1,6 +1,6 @@
 substitutions:
   _SERVICE_NAME: quizmd-server
-  _REGION: us-central1
+  _REGION: europe-west1
   _PLATFORM: managed
 
 steps:
